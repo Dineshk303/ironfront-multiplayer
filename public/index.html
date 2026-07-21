@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#07101d">
+  <title>Ironfront Multiplayer</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <main id="app">
+    <section id="homeScreen" class="screen active menu-screen">
+      <div class="menu-card">
+        <div class="eyebrow">REAL-TIME WEBGL MULTIPLAYER</div>
+        <h1>IRONFRONT ONLINE</h1>
+        <p class="lead">Create a private lobby, share its URL, and battle with up to eight players.</p>
+
+        <label class="field">
+          <span>Player name</span>
+          <input id="playerName" maxlength="18" autocomplete="nickname" placeholder="Commander">
+        </label>
+
+        <div class="section-title">Starting vehicle</div>
+        <div id="homeVehicleGrid" class="vehicle-grid"></div>
+
+        <div class="home-actions">
+          <button id="createRoomButton" class="primary large">Create game</button>
+          <div class="join-row">
+            <input id="roomCodeInput" maxlength="5" placeholder="ROOM CODE" autocomplete="off">
+            <button id="joinRoomButton">Join game</button>
+          </div>
+        </div>
+        <p id="homeMessage" class="message" aria-live="polite"></p>
+      </div>
+    </section>
+
+    <section id="lobbyScreen" class="screen menu-screen">
+      <div class="lobby-layout">
+        <div class="menu-card lobby-main">
+          <div class="lobby-header">
+            <div>
+              <div class="eyebrow">PRIVATE LOBBY</div>
+              <h2>ROOM <span id="roomCodeLabel">-----</span></h2>
+            </div>
+            <button id="copyInviteButton">Copy invite URL</button>
+          </div>
+
+          <div id="leaderSettings" class="leader-settings hidden">
+            <div class="section-title">Leader match settings</div>
+            <div class="settings-grid">
+              <label class="field">
+                <span>World</span>
+                <select id="worldSelect">
+                  <option value="jungle">Emerald Jungle</option>
+                  <option value="mountain">Frozen Mountain</option>
+                  <option value="arena">Grand Combat Arena</option>
+                  <option value="battlefield">Ruined Battleground</option>
+                  <option value="space">Zero-G Space Station</option>
+                </select>
+              </label>
+              <label class="field">
+                <span>Faction</span>
+                <select id="factionSelect">
+                  <option value="iron">Iron Legion — extra hull</option>
+                  <option value="neon">Neon Wolves — extra speed</option>
+                  <option value="solar">Solar Dominion — extra damage</option>
+                  <option value="void">Void Syndicate — faster abilities</option>
+                </select>
+              </label>
+            </div>
+          </div>
+
+          <div class="section-title">Your vehicle</div>
+          <div id="lobbyVehicleGrid" class="vehicle-grid"></div>
+
+          <div class="lobby-actions">
+            <button id="startMatchButton" class="primary hidden">Start match</button>
+            <button id="leaveLobbyButton">Leave lobby</button>
+          </div>
+          <p id="lobbyMessage" class="message" aria-live="polite"></p>
+        </div>
+
+        <aside class="menu-card player-panel">
+          <div class="player-panel-title">
+            <h3>Players</h3>
+            <span id="playerCountLabel">0 / 8</span>
+          </div>
+          <div id="lobbyPlayerList" class="player-list"></div>
+          <div class="lobby-tip">The arena grows as more players join. The leader chooses the world and faction.</div>
+        </aside>
+      </div>
+    </section>
+
+    <section id="gameScreen" class="screen game-screen">
+      <div id="gameCanvas"></div>
+
+      <header class="hud top-hud">
+        <div class="hud-card health-card">
+          <span class="hud-label">HULL</span>
+          <div class="health-track"><div id="healthBar" class="health-fill"></div></div>
+          <strong id="healthText">0 / 0</strong>
+        </div>
+        <div class="hud-card world-card">
+          <strong id="worldLabel">Emerald Jungle</strong>
+          <span id="factionLabel">Iron Legion</span>
+        </div>
+        <div class="hud-card score-card">
+          <span>K <strong id="killsLabel">0</strong></span>
+          <span>D <strong id="deathsLabel">0</strong></span>
+          <span>S <strong id="scoreLabel">0</strong></span>
+        </div>
+      </header>
+
+      <aside class="hud player-roster" id="gamePlayerList"></aside>
+
+      <div id="powerupBanner" class="powerup-banner hidden"></div>
+      <div id="respawnOverlay" class="respawn-overlay hidden">Respawning…</div>
+      <div id="eventFeed" class="event-feed"></div>
+
+      <div class="hud bottom-controls">
+        <button id="cameraToggleButton">2D camera</button>
+        <button id="abilityButton" class="primary">Ability [Q]</button>
+        <button id="leaveMatchButton">Leave match</button>
+      </div>
+
+      <div class="mobile-controls">
+        <div class="dpad">
+          <span></span><button data-touch="forward">▲</button><span></span>
+          <button data-touch="left">◀</button><button data-touch="backward">▼</button><button data-touch="right">▶</button>
+        </div>
+        <button id="mobileFireButton" class="fire-button">FIRE</button>
+        <button id="mobileAbilityButton" class="ability-mobile">ABILITY</button>
+      </div>
+    </section>
+  </main>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script type="module" src="/game.js"></script>
+</body>
+</html>
