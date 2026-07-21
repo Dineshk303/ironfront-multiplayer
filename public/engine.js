@@ -1,4 +1,5 @@
 import * as THREE from '/vendor/three.module.js';
+import { controls } from './controls.js?v=3.0.0';
 
 const VEHICLES = {
   vanguard: { name: 'Vanguard Tank', type: 'tank', hp: 120, speed: 10, damage: 24, reload: 0.52, radius: 1.45, ability: 'Fortress Shield', color: '#4b92ff' },
@@ -25,6 +26,13 @@ const DIFFICULTIES = {
 
 const POWERUP_TYPES = ['heal', 'shield', 'rapid', 'speed', 'godmode', 'morph'];
 
+const FACTION_COLORS = {
+  iron: '#7795b9',
+  neon: '#55d8b4',
+  solar: '#e3a53c',
+  void: '#b879ff'
+};
+
 let initialized = false;
 let renderer;
 let scene;
@@ -42,7 +50,6 @@ const engineState = {
   mode: 'idle',
   paused: false,
   cameraMode: '3d',
-  input: { forward: false, backward: false, left: false, right: false, fire: false },
   world: 'jungle',
   radius: 30,
   colliders: [],
@@ -479,7 +486,7 @@ function startSingleInternal(config) {
   engineState.mode = 'single';
   engineState.paused = false;
   engineState.cameraMode = '3d';
-  resetInput();
+  controls.reset();
 
   engineState.single = {
     level: config.level,
@@ -488,7 +495,7 @@ function startSingleInternal(config) {
     baseVehicle: config.vehicle,
     currentVehicle: config.vehicle,
     morphUntil: 0,
-    player: { mesh: null, hp: 1, maxHp: 1, reloadRemaining: 0, invulnerableUntil: performance.now() + 1400 },
+    player: { mesh: null, hp: 1, maxHp: 1, nextShotAt: 0, invulnerableUntil: performance.now() + 1400 },
     enemies: [],
     bullets: [],
     pickups: [],
@@ -528,40 +535,98 @@ function startSingleInternal(config) {
   }
 }
 
-function spawnSingleBullet({ owner, hostile, angleOffset = 0, explosive = false, damageMultiplier = 1 }) {
-  const single = engineState.single;
-  const sourceMesh = hostile ? owner.mesh : single.player.mesh;
-  const angle = sourceMesh.rotation.y + angleOffset;
-  const direction = new THREE.Vector3(Math.sin(angle), 0, -Math.cos(angle));
-  const color = hostile ? '#ff6972' : explosive ? '#f3c94c' : VEHICLES[single.currentVehicle].color;
-  const radius = explosive ? 0.32 : 0.2;
-  const mesh = new THREE.Mesh(new THREE.SphereGeometry(radius, 9, 9), new THREE.MeshStandardMaterial({ color, emissive: color, emissiveIntensity: 2.3 }));
-  const sourceRadius = hostile ? owner.radius : playerStats(single).radius;
-  mesh.position.copy(sourceMesh.position);
-  mesh.position.y += sourceMesh.userData.type === 'walker' ? 2.7 : 1.3;
-  mesh.position.addScaledVector(direction, sourceRadius + 1);
-  actorsRoot.add(mesh);
-  const damage = hostile ? owner.damage : playerStats(single).damage * damageMultiplier * (single.power === 'godmode' && single.powerUntil > performance.now() ? 1.8 : 1);
-  single.bullets.push({ mesh, hostile, ownerId: hostile ? owner.id : 'player', vx: direction.x * (hostile ? 16 : 23) * WORLDS[engineState.world].bullet, vz: direction.z * (hostile ? 16 : 23) * WORLDS[engineState.world].bullet, damage, radius, explosive, life: engineState.world === 'space' ? 4.5 : 3.2 });
+function segmentCircleHit2D(x1, z1, x2, z2, cx, cz, radius) {
+  const dx = x2 - x1;
+  const dz = z2 - z1;
+  const lengthSquared = dx * dx + dz * dz;
+  if (lengthSquared <= 0.000001) return Math.hypot(x1 - cx, z1 - cz) <= radius;
+  const projection = THREE.MathUtils.clamp(((cx - x1) * dx + (cz - z1) * dz) / lengthSquared, 0, 1);
+  const closestX = x1 + dx * projection;
+  const closestZ = z1 + dz * projection;
+  return Math.hypot(closestX - cx, closestZ - cz) <= radius;
 }
 
-function fireSinglePlayer() {
+function projectileHitsWorld(projectile, nextX, nextZ) {
+  if (Math.hypot(nextX, nextZ) > engineState.radius + 1) return true;
+  return engineState.colliders.some((obstacle) => segmentCircleHit2D(
+    projectile.mesh.position.x,
+    projectile.mesh.position.z,
+    nextX,
+    nextZ,
+    obstacle.x,
+    obstacle.z,
+    obstacle.r + projectile.radius
+  ));
+}
+
+function createSingleProjectile({ owner, hostile, angleOffset = 0, explosive = false, damageMultiplier = 1, speedMultiplier = 1 }) {
   const single = engineState.single;
-  if (!single || single.player.reloadRemaining > 0 || single.gameOver || single.completed) return;
-  const now = performance.now();
-  const rapid = (single.power === 'rapid' && single.powerUntil > now) || (single.currentVehicle === 'striker' && single.abilityUntil > now);
-  const godmode = single.power === 'godmode' && single.powerUntil > now;
-  const titanSalvo = single.currentVehicle === 'titan' && single.abilityUntil > now;
+  if (!single) return;
+  const sourceMesh = hostile ? owner.mesh : single.player.mesh;
+  const angle = sourceMesh.rotation.y + angleOffset;
+  const directionX = Math.sin(angle);
+  const directionZ = -Math.cos(angle);
+  const color = hostile ? '#ff6972' : explosive ? '#f3c94c' : VEHICLES[single.currentVehicle].color;
+  const radius = explosive ? 0.32 : 0.2;
+  const sourceRadius = hostile ? owner.radius : playerStats(single).radius;
+  const mesh = new THREE.Mesh(
+    new THREE.SphereGeometry(radius, 9, 9),
+    new THREE.MeshStandardMaterial({ color, emissive: color, emissiveIntensity: 2.3 })
+  );
+  mesh.position.copy(sourceMesh.position);
+  mesh.position.y += sourceMesh.userData.type === 'walker' ? 2.7 : 1.3;
+  mesh.position.x += directionX * (sourceRadius + 1.05);
+  mesh.position.z += directionZ * (sourceRadius + 1.05);
+  actorsRoot.add(mesh);
+
+  const speed = (hostile ? 16 : 23) * WORLDS[engineState.world].bullet * speedMultiplier;
+  const damage = hostile
+    ? owner.damage * damageMultiplier
+    : playerStats(single).damage * damageMultiplier * (single.power === 'godmode' && single.powerUntil > performance.now() ? 1.8 : 1);
+
+  single.bullets.push({
+    id: `projectile-${single.enemySequence += 1}-${performance.now()}`,
+    mesh,
+    hostile,
+    ownerId: hostile ? owner.id : 'player',
+    vx: directionX * speed,
+    vz: directionZ * speed,
+    damage,
+    radius,
+    explosive,
+    expiresAt: performance.now() + (engineState.world === 'space' ? 4500 : 3200)
+  });
+}
+
+function tryFireSinglePlayer(force = false) {
+  const single = engineState.single;
+  if (!single || single.gameOver || single.completed) return false;
+  const time = performance.now();
+  if (!force && time < single.player.nextShotAt) return false;
+
+  const rapid = (single.power === 'rapid' && single.powerUntil > time) || (single.currentVehicle === 'striker' && single.abilityUntil > time);
+  const godmode = single.power === 'godmode' && single.powerUntil > time;
+  const titanSalvo = single.currentVehicle === 'titan' && single.abilityUntil > time;
+
   if (titanSalvo) {
-    [-0.32, -0.16, 0, 0.16, 0.32].forEach((offset) => spawnSingleBullet({ owner: single.player, hostile: false, angleOffset: offset, explosive: true, damageMultiplier: 1.35 }));
+    [-0.32, -0.16, 0, 0.16, 0.32].forEach((offset) => createSingleProjectile({
+      owner: single.player,
+      hostile: false,
+      angleOffset: offset,
+      explosive: true,
+      damageMultiplier: 1.35
+    }));
     single.abilityUntil = 0;
   } else if (rapid) {
-    spawnSingleBullet({ owner: single.player, hostile: false, angleOffset: -0.08, explosive: godmode });
-    spawnSingleBullet({ owner: single.player, hostile: false, angleOffset: 0.08, explosive: godmode });
+    createSingleProjectile({ owner: single.player, hostile: false, angleOffset: -0.075, explosive: godmode });
+    createSingleProjectile({ owner: single.player, hostile: false, angleOffset: 0.075, explosive: godmode });
   } else {
-    spawnSingleBullet({ owner: single.player, hostile: false, explosive: godmode });
+    createSingleProjectile({ owner: single.player, hostile: false, explosive: godmode });
   }
-  single.player.reloadRemaining = playerStats(single).reload * (rapid || godmode ? 0.42 : 1);
+
+  const reloadSeconds = playerStats(single).reload * (rapid || godmode ? 0.42 : 1);
+  single.player.nextShotAt = time + Math.max(70, reloadSeconds * 1000);
+  return true;
 }
 
 function spawnSinglePickup(type = null, position = null, value = 0) {
@@ -654,31 +719,25 @@ function destroySingleEnemy(enemy, bullet) {
     spawnSinglePickup('coin', enemy.mesh.position, 30 + single.level * 3);
     single.callbacks.onEvent?.('Special red enemy destroyed — coin cache dropped.');
   }
-  if (bullet?.explosive) {
-    single.enemies.forEach((other) => {
-      if (other.mesh.position.distanceTo(bullet.mesh.position) < 5) other.hp -= playerStats(single).damage * 0.9;
-    });
-  }
 }
 
 function updateSinglePlayer(deltaTime) {
   const single = engineState.single;
   const world = WORLDS[engineState.world];
-  const now = performance.now();
+  const time = performance.now();
   const vehicle = VEHICLES[single.currentVehicle];
   const stats = playerStats(single);
-  const turn = (engineState.input.right ? 1 : 0) - (engineState.input.left ? 1 : 0);
-  const drive = (engineState.input.forward ? 1 : 0) - (engineState.input.backward ? 1 : 0);
-  single.player.mesh.rotation.y += turn * deltaTime * 2.45 * world.traction;
-  if (drive !== 0) {
+  const control = controls.snapshot();
+
+  single.player.mesh.rotation.y += control.turn * deltaTime * 2.45 * world.traction;
+  if (control.move !== 0) {
     const direction = new THREE.Vector3(Math.sin(single.player.mesh.rotation.y), 0, -Math.cos(single.player.mesh.rotation.y));
-    const phase = single.currentVehicle === 'spectre' && single.abilityUntil > now;
-    const speedPower = (single.power === 'speed' || single.power === 'godmode') && single.powerUntil > now;
+    const phase = single.currentVehicle === 'spectre' && single.abilityUntil > time;
+    const speedPower = (single.power === 'speed' || single.power === 'godmode') && single.powerUntil > time;
     const speed = stats.speed * world.traction * terrainMultiplier(single.player.mesh.position.x, single.player.mesh.position.z) * (phase ? 1.65 : 1) * (speedPower ? 1.55 : 1);
-    moveWithCollision(single.player.mesh, direction.x * drive * speed * deltaTime, direction.z * drive * speed * deltaTime, stats.radius);
+    moveWithCollision(single.player.mesh, direction.x * control.move * speed * deltaTime, direction.z * control.move * speed * deltaTime, stats.radius);
   }
-  if (engineState.input.fire) fireSinglePlayer();
-  single.player.reloadRemaining = Math.max(0, single.player.reloadRemaining - deltaTime);
+  if (control.fire) tryFireSinglePlayer();
 
   if (engineState.world === 'space' || vehicle.type === 'hover') {
     single.player.mesh.position.y = 0.55 + Math.sin(performance.now() * 0.003) * 0.12;
@@ -686,12 +745,12 @@ function updateSinglePlayer(deltaTime) {
     single.player.mesh.position.y = 0;
   }
 
-  if (single.morphUntil > 0 && now >= single.morphUntil) {
+  if (single.morphUntil > 0 && time >= single.morphUntil) {
     single.morphUntil = 0;
     replaceSinglePlayerVehicle(single.baseVehicle, false);
     single.callbacks.onEvent?.(`Vehicle Morph ended. Returned to ${VEHICLES[single.baseVehicle].name}.`);
   }
-  if (single.powerUntil > 0 && now >= single.powerUntil) {
+  if (single.powerUntil > 0 && time >= single.powerUntil) {
     single.powerUntil = 0;
     single.power = null;
   }
@@ -721,10 +780,10 @@ function updateSingleEnemies(deltaTime) {
     if (engineState.world === 'space' || VEHICLES[enemy.vehicle].type === 'hover') enemy.mesh.position.y = 0.55 + Math.sin(performance.now() * 0.002 + enemy.mesh.position.x) * 0.14;
     enemy.reloadRemaining -= deltaTime;
     if (enemy.reloadRemaining <= 0 && distance < 34) {
-      spawnSingleBullet({ owner: enemy, hostile: true, explosive: enemy.boss });
+      createSingleProjectile({ owner: enemy, hostile: true, explosive: enemy.boss });
       if (enemy.boss && Math.random() < 0.55) {
-        spawnSingleBullet({ owner: enemy, hostile: true, angleOffset: -0.16, explosive: true });
-        spawnSingleBullet({ owner: enemy, hostile: true, angleOffset: 0.16, explosive: true });
+        createSingleProjectile({ owner: enemy, hostile: true, angleOffset: -0.16, explosive: true });
+        createSingleProjectile({ owner: enemy, hostile: true, angleOffset: 0.16, explosive: true });
       }
       enemy.reloadRemaining = enemy.reload;
     }
@@ -733,40 +792,58 @@ function updateSingleEnemies(deltaTime) {
 
 function updateSingleBullets(deltaTime) {
   const single = engineState.single;
+  const time = performance.now();
   for (let index = single.bullets.length - 1; index >= 0; index -= 1) {
-    const bullet = single.bullets[index];
-    bullet.mesh.position.x += bullet.vx * deltaTime;
-    bullet.mesh.position.z += bullet.vz * deltaTime;
-    bullet.life -= deltaTime;
-    const expired = bullet.life <= 0 || Math.hypot(bullet.mesh.position.x, bullet.mesh.position.z) > engineState.radius + 2 || collides(bullet.mesh.position.x, bullet.mesh.position.z, bullet.radius);
-    if (expired) {
-      actorsRoot.remove(bullet.mesh);
+    const projectile = single.bullets[index];
+    const startX = projectile.mesh.position.x;
+    const startZ = projectile.mesh.position.z;
+    const nextX = startX + projectile.vx * deltaTime;
+    const nextZ = startZ + projectile.vz * deltaTime;
+
+    if (time >= projectile.expiresAt || projectileHitsWorld(projectile, nextX, nextZ)) {
+      actorsRoot.remove(projectile.mesh);
       single.bullets.splice(index, 1);
       continue;
     }
-    if (bullet.hostile) {
-      const radius = playerStats(single).radius;
-      if (bullet.mesh.position.distanceTo(single.player.mesh.position) < radius + bullet.radius) {
-        damageSinglePlayer(bullet.damage);
-        actorsRoot.remove(bullet.mesh);
+
+    if (projectile.hostile) {
+      const radius = playerStats(single).radius + projectile.radius;
+      const playerPosition = single.player.mesh.position;
+      if (segmentCircleHit2D(startX, startZ, nextX, nextZ, playerPosition.x, playerPosition.z, radius)) {
+        damageSinglePlayer(projectile.damage);
+        createExplosion(new THREE.Vector3(nextX, projectile.mesh.position.y, nextZ), '#ff6972', projectile.explosive ? 0.55 : 0.22);
+        actorsRoot.remove(projectile.mesh);
         single.bullets.splice(index, 1);
+        continue;
       }
     } else {
-      let hit = false;
+      let hitEnemy = null;
       for (let enemyIndex = single.enemies.length - 1; enemyIndex >= 0; enemyIndex -= 1) {
         const enemy = single.enemies[enemyIndex];
-        if (bullet.mesh.position.distanceTo(enemy.mesh.position) < enemy.radius + bullet.radius) {
-          enemy.hp -= bullet.damage;
-          createExplosion(bullet.mesh.position, bullet.explosive ? '#f3c94c' : VEHICLES[single.currentVehicle].color, bullet.explosive ? 0.6 : 0.25);
-          if (enemy.hp <= 0) destroySingleEnemy(enemy, bullet);
-          actorsRoot.remove(bullet.mesh);
-          single.bullets.splice(index, 1);
-          hit = true;
+        if (segmentCircleHit2D(startX, startZ, nextX, nextZ, enemy.mesh.position.x, enemy.mesh.position.z, enemy.radius + projectile.radius)) {
+          hitEnemy = enemy;
           break;
         }
       }
-      if (hit) continue;
+
+      if (hitEnemy) {
+        hitEnemy.hp -= projectile.damage;
+        const impactPosition = new THREE.Vector3(nextX, projectile.mesh.position.y, nextZ);
+        createExplosion(impactPosition, projectile.explosive ? '#f3c94c' : VEHICLES[single.currentVehicle].color, projectile.explosive ? 0.6 : 0.25);
+        if (hitEnemy.hp <= 0) destroySingleEnemy(hitEnemy, projectile);
+        if (projectile.explosive) {
+          single.enemies.forEach((other) => {
+            if (other !== hitEnemy && other.mesh.position.distanceTo(impactPosition) < 5) other.hp -= playerStats(single).damage * 0.9;
+          });
+        }
+        actorsRoot.remove(projectile.mesh);
+        single.bullets.splice(index, 1);
+        continue;
+      }
     }
+
+    projectile.mesh.position.x = nextX;
+    projectile.mesh.position.z = nextZ;
   }
 }
 
@@ -912,7 +989,7 @@ function activateSingleAbility() {
     createShockwave(single.player.mesh.position.x, single.player.mesh.position.z);
   } else if (single.currentVehicle === 'titan') {
     single.abilityUntil = now + 1000;
-    fireSinglePlayer();
+    tryFireSinglePlayer(true);
   }
   single.callbacks.onEvent?.(`${VEHICLES[single.currentVehicle].ability} activated.`);
 }
@@ -927,8 +1004,19 @@ function startMultiplayerInternal(config) {
   engineState.mode = 'multi';
   engineState.paused = false;
   engineState.cameraMode = '3d';
-  resetInput();
+  controls.reset();
   setupWorld({ worldId: config.match.settings.world, radius: config.match.radius, seed: config.match.seed, obstacles: config.match.obstacles });
+  if (config.match.settings.challenge === 'control_zone') {
+    const radius = config.match.controlZoneRadius || 6.5;
+    const zone = new THREE.Mesh(
+      new THREE.RingGeometry(radius - 0.35, radius, 64),
+      new THREE.MeshStandardMaterial({ color: '#dcecff', emissive: '#4b92ff', emissiveIntensity: 0.75, transparent: true, opacity: 0.72, side: THREE.DoubleSide })
+    );
+    zone.rotation.x = -Math.PI / 2;
+    zone.position.y = 0.045;
+    zone.name = 'control-zone-marker';
+    worldRoot.add(zone);
+  }
   engineState.multiplayer = {
     socket: config.socket,
     selfId: config.selfId,
@@ -938,7 +1026,8 @@ function startMultiplayerInternal(config) {
     renderedBullets: new Map(),
     renderedPowerups: new Map(),
     callbacks: config,
-    lastInputSent: 0
+    lastControlSentAt: 0,
+    lastControlSequenceSent: -1
   };
 }
 
@@ -951,7 +1040,7 @@ function ensureMultiplayerPlayerMesh(player) {
       actorsRoot.remove(entry.group);
       actorsRoot.remove(entry.label);
     }
-    const group = buildVehicle(vehicle.type, player.id === multiplayer.selfId ? '#4b92ff' : colorForId(player.id));
+    const group = buildVehicle(vehicle.type, FACTION_COLORS[player.faction] || (player.id === multiplayer.selfId ? '#4b92ff' : colorForId(player.id)));
     const label = makeLabel(player.name);
     actorsRoot.add(group, label);
     entry = { group, label, vehicle: player.vehicle };
@@ -1001,7 +1090,7 @@ function syncMultiplayer(snapshot, deltaTime) {
   snapshot.bullets.forEach((bullet) => {
     let mesh = multiplayer.renderedBullets.get(bullet.id);
     if (!mesh) {
-      const color = bullet.ownerId === multiplayer.selfId ? '#7db7ff' : '#ff6c73';
+      const color = FACTION_COLORS[bullet.ownerFaction] || (bullet.ownerId === multiplayer.selfId ? '#7db7ff' : '#ff6c73');
       mesh = new THREE.Mesh(new THREE.SphereGeometry(bullet.radius, 9, 9), new THREE.MeshStandardMaterial({ color, emissive: color, emissiveIntensity: 2.2 }));
       actorsRoot.add(mesh);
       multiplayer.renderedBullets.set(bullet.id, mesh);
@@ -1043,7 +1132,12 @@ function syncMultiplayer(snapshot, deltaTime) {
       dead: self.dead,
       ability: VEHICLES[self.vehicle]?.ability || 'Ability',
       abilityCooldown: remaining,
-      players: [...snapshot.players].sort((a, b) => b.score - a.score)
+      faction: self.faction,
+      players: [...snapshot.players].sort((a, b) => (b.kills - a.kills) || (b.objectiveScore - a.objectiveScore) || (b.score - a.score)),
+      teamScores: snapshot.teamScores || {},
+      remainingMs: snapshot.remainingMs || 0,
+      challenge: snapshot.settings.challenge,
+      objective: snapshot.objective || null
     });
   }
 }
@@ -1067,18 +1161,16 @@ function updateCamera(deltaTime) {
   }
 }
 
-function sendMultiplayerInput(force = false) {
+function sendMultiplayerControl(force = false) {
   const multiplayer = engineState.multiplayer;
   if (!multiplayer) return;
   const time = performance.now();
-  if (!force && time - multiplayer.lastInputSent < 33) return;
-  multiplayer.lastInputSent = time;
-  multiplayer.socket.emit('input', engineState.input);
-}
-
-function resetInput() {
-  Object.keys(engineState.input).forEach((key) => { engineState.input[key] = false; });
-  if (engineState.mode === 'multi') sendMultiplayerInput(true);
+  const packet = controls.networkPacket();
+  const sequenceChanged = packet.sequence !== multiplayer.lastControlSequenceSent;
+  if (!force && !sequenceChanged && time - multiplayer.lastControlSentAt < 100) return;
+  multiplayer.lastControlSentAt = time;
+  multiplayer.lastControlSequenceSent = packet.sequence;
+  multiplayer.socket.emit('control', packet);
 }
 
 function resize() {
@@ -1090,20 +1182,6 @@ function resize() {
   camera.updateProjectionMatrix();
 }
 
-function handleKey(event, active) {
-  if (engineState.mode === 'idle') return;
-  const target = event.target;
-  if (target instanceof HTMLElement && (target.matches('input, textarea, select, button') || target.isContentEditable)) return;
-  const controlCodes = ['KeyW', 'KeyS', 'KeyA', 'KeyD', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Space'];
-  if (controlCodes.includes(event.code)) event.preventDefault();
-  if (event.code === 'KeyW' || event.code === 'ArrowUp') setInput('forward', active);
-  if (event.code === 'KeyS' || event.code === 'ArrowDown') setInput('backward', active);
-  if (event.code === 'KeyA' || event.code === 'ArrowLeft') setInput('left', active);
-  if (event.code === 'KeyD' || event.code === 'ArrowRight') setInput('right', active);
-  if (event.code === 'Space') setInput('fire', active);
-  if (active && !event.repeat && event.code === 'KeyQ') activateAbility();
-  if (active && !event.repeat && event.code === 'KeyC') toggleCamera();
-}
 
 function animate(time) {
   const deltaTime = Math.min((time - engineState.previousTime) / 1000, 0.05);
@@ -1113,7 +1191,7 @@ function animate(time) {
       if (engineState.mode === 'single') updateSingle(deltaTime);
       else if (engineState.mode === 'multi' && engineState.multiplayer?.snapshot) {
         syncMultiplayer(engineState.multiplayer.snapshot, deltaTime);
-        sendMultiplayerInput();
+        sendMultiplayerControl();
       }
     }
     if (engineState.mode !== 'idle') updateCamera(deltaTime);
@@ -1153,12 +1231,13 @@ export async function initialize({ canvasHost: host, onFatalError }) {
   sun.shadow.camera.bottom = -70;
   scene.add(sun);
   window.addEventListener('resize', resize);
-  window.addEventListener('keydown', (event) => handleKey(event, true));
-  window.addEventListener('keyup', (event) => handleKey(event, false));
-  window.addEventListener('blur', resetInput);
-  window.addEventListener('pagehide', resetInput);
-  document.addEventListener('visibilitychange', () => {
-    if (document.hidden) resetInput();
+  controls.attach({
+    isEnabled: () => engineState.mode !== 'idle' && !engineState.paused,
+    onAbility: () => activateAbility(),
+    onCamera: () => toggleCamera(),
+    onChange: () => {
+      if (engineState.mode === 'multi') sendMultiplayerControl(true);
+    }
   });
   resize();
   initialized = true;
@@ -1182,15 +1261,11 @@ export function applyMultiplayerSnapshot(snapshot) {
 }
 
 export function setInput(control, active) {
-  if (!(control in engineState.input)) return;
-  const next = Boolean(active);
-  if (engineState.input[control] === next) return;
-  engineState.input[control] = next;
-  if (engineState.mode === 'multi') sendMultiplayerInput(true);
+  controls.set(control, Boolean(active), `external:${control}`);
 }
 
 export function releaseAllInputs() {
-  resetInput();
+  controls.reset();
 }
 
 export function activateAbility() {
@@ -1206,7 +1281,7 @@ export function toggleCamera() {
 export function setPaused(value) {
   if (engineState.mode !== 'single') return;
   engineState.paused = Boolean(value);
-  if (engineState.paused) resetInput();
+  if (engineState.paused) controls.reset();
 }
 
 export function createRemoteShockwave(x, z) {
@@ -1214,7 +1289,7 @@ export function createRemoteShockwave(x, z) {
 }
 
 export function stop() {
-  resetInput();
+  controls.reset();
   engineState.mode = 'idle';
   engineState.paused = false;
   engineState.multiplayer = null;

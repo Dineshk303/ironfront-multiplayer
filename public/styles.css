@@ -231,3 +231,49 @@ h3 { margin-bottom: 6px; }
   .boss-panel { top: 120px; }
   .fatal-error { grid-template-columns: 1fr; }
 }
+
+/* v3 multiplayer challenge and controls UI */
+.leader-settings-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.loadout-grid { margin-top: 18px; display: grid; grid-template-columns: minmax(220px, 360px); }
+.lobby-rule-text { margin: 10px 0 0; color: var(--muted); font-size: .82rem; line-height: 1.5; }
+.player-row .faction-name { color: #a9c9ef; }
+.player-row[data-faction="iron"] { border-left: 4px solid #7795b9; }
+.player-row[data-faction="neon"] { border-left: 4px solid #55d8b4; }
+.player-row[data-faction="solar"] { border-left: 4px solid #e3a53c; }
+.player-row[data-faction="void"] { border-left: 4px solid #b879ff; }
+
+.top-hud { grid-template-columns: 1fr auto auto 1fr; }
+.timer-card { min-width: 132px; text-align: center; display: grid; gap: 2px; }
+.timer-card strong { font-size: 1.2rem; }
+.timer-card span:last-child { max-width: 140px; color: var(--muted); font-size: .7rem; }
+.team-score-panel { top: 92px; left: 14px; width: 230px; padding: 8px; border: 1px solid rgba(101,139,179,.45); border-radius: 14px; background: rgba(4,13,23,.8); }
+.team-score-row { display: grid; grid-template-columns: 1fr auto; gap: 8px; padding: 7px 8px; border-radius: 8px; font-size: .76rem; }
+.team-score-row.me { background: rgba(75,146,255,.2); }
+.team-score-row strong { font-size: .9rem; }
+.objective-panel { left: 50%; top: 150px; transform: translateX(-50%); padding: 9px 14px; border: 1px solid rgba(101,139,179,.55); border-radius: 999px; color: #dcecff; background: rgba(4,13,23,.83); font-size: .78rem; font-weight: 800; }
+.multiplayer-result-card { width: min(620px, 100%); }
+.result-team-grid { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 8px; margin-top: 16px; }
+.result-team { padding: 11px; border: 1px solid var(--line); border-radius: 12px; display: flex; justify-content: space-between; gap: 10px; background: #0a1725; }
+.result-team.winner { border-color: var(--gold); background: #251e0b; }
+.result-leaderboard { display: grid; gap: 6px; margin-top: 14px; max-height: 230px; overflow-y: auto; text-align: left; }
+.result-player-row { display: grid; grid-template-columns: 28px 1fr auto; gap: 10px; align-items: center; padding: 8px 10px; border-radius: 10px; background: #091522; font-size: .82rem; }
+.result-player-row small { color: var(--muted); }
+
+@media (max-width: 900px) {
+  .leader-settings-grid { grid-template-columns: 1fr 1fr; }
+  .top-hud { grid-template-columns: 1fr auto 1fr; }
+  .timer-card { grid-row: 2; grid-column: 2; }
+  .team-score-panel { top: 150px; }
+}
+
+@media (max-width: 650px) {
+  .leader-settings-grid { grid-template-columns: 1fr; }
+  .top-hud { grid-template-columns: 1fr 1fr; }
+  .world-card { grid-column: 1 / -1; }
+  .timer-card { grid-column: 1; grid-row: 3; justify-self: start; min-width: 125px; }
+  .score-card { grid-column: 2; grid-row: 3; }
+  .player-roster { top: 188px; }
+  .team-score-panel { top: 188px; left: 7px; width: 170px; }
+  .objective-panel { top: 250px; max-width: calc(100% - 20px); text-align: center; }
+  .result-team-grid { grid-template-columns: 1fr; }
+}

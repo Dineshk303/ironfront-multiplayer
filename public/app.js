@@ -23,6 +23,28 @@ const FACTIONS = {
   void: 'Void Syndicate'
 };
 
+const FACTION_COLORS = {
+  iron: '#7795b9',
+  neon: '#55d8b4',
+  solar: '#e3a53c',
+  void: '#b879ff'
+};
+
+const CHALLENGES = {
+  team_deathmatch: {
+    name: 'Team Deathmatch',
+    description: 'Destroy enemy vehicles. Every elimination gives your faction 3 points.'
+  },
+  control_zone: {
+    name: 'Control Zone',
+    description: 'Hold the central zone. Exclusive control gives 1 point per second; eliminations give 1 point.'
+  },
+  salvage_rush: {
+    name: 'Salvage Rush',
+    description: 'Collect battlefield power-ups. Pickups give 2 points, rare cores give 3, and eliminations give 1.'
+  }
+};
+
 const POWERUP_LABELS = {
   heal: 'Repair Core',
   shield: 'Shield Field',
@@ -69,6 +91,7 @@ let socket = null;
 let socketConnected = false;
 let resumeInFlight = false;
 let activeMatchKey = null;
+let selectedMultiplayerFaction = 'iron';
 
 const MULTIPLAYER_CLIENT_ID = (() => {
   const key = 'ironfront-multiplayer-client-v1';
@@ -275,7 +298,7 @@ function renderWorldMap() {
 async function loadEngine() {
   if (engine) return engine;
   if (!enginePromise) {
-    enginePromise = import('/engine.js?v=2.1.0').then((module) => {
+    enginePromise = import('/engine.js?v=3.0.0').then((module) => {
       engine = module;
       return module.initialize({
         canvasHost: document.getElementById('gameCanvas'),
@@ -308,7 +331,12 @@ function prepareGameHud(mode, worldName, subLabel) {
   document.getElementById('respawnOverlay').classList.add('hidden');
   document.getElementById('levelCompleteOverlay').classList.add('hidden');
   document.getElementById('singleGameOverOverlay').classList.add('hidden');
+  document.getElementById('multiplayerResultOverlay').classList.add('hidden');
   document.getElementById('pauseOverlay').classList.add('hidden');
+  document.getElementById('multiplayerResultOverlay').classList.add('hidden');
+  document.getElementById('multiplayerTimerCard').classList.toggle('hidden', mode !== 'multi');
+  document.getElementById('teamScorePanel').classList.toggle('hidden', mode !== 'multi');
+  document.getElementById('objectivePanel').classList.toggle('hidden', mode !== 'multi');
   document.getElementById('eventFeed').innerHTML = '';
 }
 
@@ -436,7 +464,7 @@ async function enterMultiplayerMatch(match, initialSnapshot = null) {
   const gameEngine = await loadEngine();
   gameMode = 'multi';
   latestSnapshot = initialSnapshot || latestSnapshot || null;
-  prepareGameHud('multi', WORLD_NAMES[match.settings.world], `${FACTIONS[match.settings.faction]} · Room ${match.roomCode}`);
+  prepareGameHud('multi', WORLD_NAMES[match.settings.world], `${CHALLENGES[match.settings.challenge]?.name || 'Team Battle'} · Room ${match.roomCode}`);
   showScreen('game');
   gameEngine.startMultiplayer({
     socket,
@@ -461,6 +489,10 @@ async function resumeCurrentRoom() {
     multiplayerRoom = response.room;
     if (response.match) {
       await enterMultiplayerMatch(response.match, response.snapshot || null);
+    } else if (response.result) {
+      gameMode = 'multi';
+      showScreen('game');
+      showMultiplayerResult(response.result);
     } else {
       activeMatchKey = null;
       gameMode = null;
@@ -517,7 +549,15 @@ function setupSocket() {
       if (gameMode !== 'multi' && gameMode !== 'multi-loading') resumeCurrentRoom();
       return;
     }
+    if (room.status === 'finished' && room.result) {
+      gameMode = 'multi';
+      showScreen('game');
+      showMultiplayerResult(room.result);
+      return;
+    }
     activeMatchKey = null;
+    gameMode = null;
+    showScreen('lobby');
     renderLobby(room);
   });
 
@@ -555,6 +595,21 @@ function setupSocket() {
 
   socket.on('shockwave', ({ x, z }) => {
     if (engine) engine.createRemoteShockwave(x, z);
+  });
+
+  socket.on('matchEnded', (result) => {
+    engine?.releaseAllInputs?.();
+    showMultiplayerResult(result);
+  });
+
+  socket.on('returnedToLobby', (room) => {
+    engine?.stop?.();
+    activeMatchKey = null;
+    gameMode = null;
+    multiplayerRoom = room;
+    document.getElementById('multiplayerResultOverlay').classList.add('hidden');
+    showScreen('lobby');
+    renderLobby(room);
   });
 
   return socket;
@@ -624,7 +679,7 @@ function renderMultiplayerVehicleGrids() {
     renderMultiplayerVehicleGrids();
     if (!multiplayerRoom) return;
     try {
-      const response = await emitWithAck('setVehicle', { vehicle: key });
+      const response = await emitWithAck('setPlayerLoadout', { vehicle: key });
       if (!response?.ok) showMessage('lobbyMessage', 'Vehicle selection failed.', true);
     } catch (error) {
       showMessage('lobbyMessage', error.message, true);
@@ -639,7 +694,7 @@ async function createRoom() {
   showMessage('homeMessage', 'Connecting and creating a lobby…');
   try {
     await waitForConnection();
-    const response = await emitWithAck('createRoom', { name: playerName(), vehicle: selectedGarageVehicle, clientId: MULTIPLAYER_CLIENT_ID });
+    const response = await emitWithAck('createRoom', { name: playerName(), vehicle: selectedGarageVehicle, faction: selectedMultiplayerFaction, clientId: MULTIPLAYER_CLIENT_ID });
     if (!response?.ok) throw new Error(response?.error || 'Could not create room.');
     await enterLobby(response);
   } catch (error) {
@@ -659,7 +714,7 @@ async function joinRoom() {
   showMessage('homeMessage', 'Joining multiplayer lobby…');
   try {
     await waitForConnection();
-    const response = await emitWithAck('joinRoom', { code, name: playerName(), vehicle: selectedGarageVehicle, clientId: MULTIPLAYER_CLIENT_ID });
+    const response = await emitWithAck('joinRoom', { code, name: playerName(), vehicle: selectedGarageVehicle, faction: selectedMultiplayerFaction, clientId: MULTIPLAYER_CLIENT_ID });
     if (!response?.ok) throw new Error(response?.error || 'Could not join room.');
     await enterLobby(response);
   } catch (error) {
@@ -678,6 +733,12 @@ async function enterLobby(response) {
     await enterMultiplayerMatch(response.match, response.snapshot || null);
     return;
   }
+  if (response.result) {
+    gameMode = 'multi';
+    showScreen('game');
+    showMultiplayerResult(response.result);
+    return;
+  }
   activeMatchKey = null;
   showScreen('lobby');
   renderLobby(response.room);
@@ -688,12 +749,19 @@ function renderLobby(room) {
   document.getElementById('roomCodeLabel').textContent = room.code;
   document.getElementById('playerCountLabel').textContent = `${room.players.length} / ${room.maxPlayers}`;
   document.getElementById('worldSelect').value = room.settings.world;
-  document.getElementById('factionSelect').value = room.settings.faction;
+  document.getElementById('challengeSelect').value = room.settings.challenge || 'team_deathmatch';
+  document.getElementById('durationSelect').value = String(room.settings.durationSeconds || 300);
+  document.getElementById('challengeDescription').textContent = CHALLENGES[room.settings.challenge]?.description || CHALLENGES.team_deathmatch.description;
+
   const isLeader = room.leaderId === multiplayerSelfId;
   document.getElementById('leaderSettings').classList.toggle('hidden', !isLeader);
   document.getElementById('startMatchButton').classList.toggle('hidden', !isLeader);
   const self = room.players.find((player) => player.id === multiplayerSelfId);
-  if (self) selectedGarageVehicle = self.vehicle;
+  if (self) {
+    selectedGarageVehicle = self.vehicle;
+    selectedMultiplayerFaction = self.faction || 'iron';
+  }
+  document.getElementById('playerFactionSelect').value = selectedMultiplayerFaction;
   renderMultiplayerVehicleGrids();
 
   const list = document.getElementById('lobbyPlayerList');
@@ -701,20 +769,40 @@ function renderLobby(room) {
   room.players.forEach((player) => {
     const row = document.createElement('div');
     row.className = 'player-row';
+    row.dataset.faction = player.faction || 'iron';
     const stateLabel = player.connected === false ? 'RECONNECTING' : player.id === room.leaderId ? 'LEADER' : 'READY';
     row.classList.toggle('disconnected', player.connected === false);
-    row.innerHTML = `<div class="player-avatar">${escapeHtml(player.name.slice(0, 1).toUpperCase())}</div><div><strong>${escapeHtml(player.name)}</strong><br><small>${VEHICLES[player.vehicle]?.name || player.vehicle}</small></div><span>${stateLabel}</span>`;
+    row.innerHTML = `<div class="player-avatar">${escapeHtml(player.name.slice(0, 1).toUpperCase())}</div><div><strong>${escapeHtml(player.name)}</strong><br><small>${VEHICLES[player.vehicle]?.name || player.vehicle}</small><br><small class="faction-name">${FACTIONS[player.faction] || player.faction}</small></div><span>${stateLabel}</span>`;
     list.appendChild(row);
   });
-  showMessage('lobbyMessage', isLeader ? 'Choose the world and faction, then start.' : 'Waiting for the lobby leader.');
+  showMessage('lobbyMessage', isLeader ? 'Choose the world, challenge and time limit. Every player chooses their own faction.' : 'Choose your faction and vehicle, then wait for the lobby leader.');
 }
 
 function sendLobbySettings() {
   if (!multiplayerRoom || multiplayerRoom.leaderId !== multiplayerSelfId) return;
   socket.emit('setLobbySettings', {
     world: document.getElementById('worldSelect').value,
-    faction: document.getElementById('factionSelect').value
+    challenge: document.getElementById('challengeSelect').value,
+    durationSeconds: Number(document.getElementById('durationSelect').value)
   });
+}
+
+async function sendPlayerFaction() {
+  selectedMultiplayerFaction = document.getElementById('playerFactionSelect').value;
+  if (!multiplayerRoom) return;
+  try {
+    const response = await emitWithAck('setPlayerLoadout', { faction: selectedMultiplayerFaction });
+    if (!response?.ok) showMessage('lobbyMessage', response?.error || 'Faction selection failed.', true);
+  } catch (error) {
+    showMessage('lobbyMessage', error.message, true);
+  }
+}
+
+function formatMatchTime(milliseconds) {
+  const totalSeconds = Math.max(0, Math.ceil(milliseconds / 1000));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
 }
 
 function updateMultiplayerHud(hud) {
@@ -722,6 +810,8 @@ function updateMultiplayerHud(hud) {
   document.getElementById('killsLabel').textContent = hud.kills;
   document.getElementById('deathsLabel').textContent = hud.deaths;
   document.getElementById('scoreLabel').textContent = hud.score;
+  document.getElementById('matchTimerLabel').textContent = formatMatchTime(hud.remainingMs);
+  document.getElementById('challengeHudLabel').textContent = CHALLENGES[hud.challenge]?.name || 'Team Battle';
   document.getElementById('respawnOverlay').classList.toggle('hidden', !hud.dead);
   document.getElementById('abilityButton').textContent = hud.abilityCooldown > 0 ? `${hud.ability} ${hud.abilityCooldown.toFixed(1)}s` : `${hud.ability} [Q]`;
   document.getElementById('abilityButton').disabled = hud.dead || hud.abilityCooldown > 0;
@@ -731,9 +821,60 @@ function updateMultiplayerHud(hud) {
   hud.players.forEach((player) => {
     const row = document.createElement('div');
     row.className = `roster-row${player.id === multiplayerSelfId ? ' me' : ''}${player.dead ? ' dead' : ''}`;
-    row.innerHTML = `<span>${escapeHtml(player.name)}</span><span>${player.kills}/${player.deaths} · ${VEHICLES[player.vehicle]?.short || player.vehicle}</span>`;
+    row.innerHTML = `<span>${escapeHtml(player.name)} · ${FACTIONS[player.faction] || player.faction}</span><span>${player.kills}/${player.deaths} · ${VEHICLES[player.vehicle]?.short || player.vehicle}</span>`;
     roster.appendChild(row);
   });
+
+  const teamPanel = document.getElementById('teamScorePanel');
+  teamPanel.innerHTML = '';
+  Object.entries(hud.teamScores || {}).sort((a, b) => b[1] - a[1]).forEach(([faction, score]) => {
+    const row = document.createElement('div');
+    row.className = `team-score-row${faction === hud.faction ? ' me' : ''}`;
+    row.style.borderLeft = `3px solid ${FACTION_COLORS[faction] || '#8fbfff'}`;
+    row.innerHTML = `<span>${FACTIONS[faction] || faction}</span><strong>${Math.floor(score)}</strong>`;
+    teamPanel.appendChild(row);
+  });
+
+  const objective = document.getElementById('objectivePanel');
+  if (hud.challenge === 'control_zone') {
+    const controller = hud.objective?.controlFaction;
+    objective.textContent = controller ? `${FACTIONS[controller] || controller} controls the central zone` : 'Central zone is neutral or contested';
+  } else if (hud.challenge === 'salvage_rush') {
+    objective.textContent = 'Collect power-ups to score faction points';
+  } else {
+    objective.textContent = 'Destroy enemy faction vehicles';
+  }
+}
+
+function showMultiplayerResult(result) {
+  if (!result) return;
+  engine?.releaseAllInputs?.();
+  document.getElementById('multiplayerResultOverlay').classList.remove('hidden');
+  const winners = result.winningFactions || [];
+  document.getElementById('matchResultTitle').textContent = winners.length === 1 ? `${FACTIONS[winners[0]] || winners[0]} wins` : 'Match draw';
+  document.getElementById('matchResultSubtitle').textContent = `${result.challengeName || 'Timed match'} ended when the time limit reached.`;
+
+  const teams = document.getElementById('matchTeamScores');
+  teams.innerHTML = '';
+  Object.entries(result.teamScores || {}).sort((a, b) => b[1] - a[1]).forEach(([faction, score]) => {
+    const row = document.createElement('div');
+    row.className = `result-team${winners.includes(faction) ? ' winner' : ''}`;
+    row.innerHTML = `<span>${FACTIONS[faction] || faction}</span><strong>${Math.floor(score)} pts</strong>`;
+    teams.appendChild(row);
+  });
+
+  const leaderboard = document.getElementById('matchLeaderboard');
+  leaderboard.innerHTML = '';
+  (result.leaderboard || []).forEach((player, index) => {
+    const row = document.createElement('div');
+    row.className = 'result-player-row';
+    row.innerHTML = `<strong>${index + 1}</strong><span>${escapeHtml(player.name)}<br><small>${FACTIONS[player.faction] || player.faction} · ${VEHICLES[player.vehicle]?.short || player.vehicle}</small></span><span>${player.kills} K · ${player.objectiveScore || 0} OBJ</span>`;
+    leaderboard.appendChild(row);
+  });
+
+  const isLeader = multiplayerRoom?.leaderId === multiplayerSelfId;
+  document.getElementById('returnLobbyButton').classList.toggle('hidden', !isLeader);
+  document.getElementById('waitForLeaderButton').classList.toggle('hidden', isLeader);
 }
 
 function leaveCurrentGame() {
@@ -742,6 +883,7 @@ function leaveCurrentGame() {
   document.getElementById('pauseOverlay').classList.add('hidden');
   document.getElementById('levelCompleteOverlay').classList.add('hidden');
   document.getElementById('singleGameOverOverlay').classList.add('hidden');
+  document.getElementById('multiplayerResultOverlay').classList.add('hidden');
   if (gameMode === 'multi') {
     socket?.emit('leaveRoom');
     multiplayerRoom = null;
@@ -818,12 +960,17 @@ document.getElementById('createRoomButton').addEventListener('click', createRoom
 document.getElementById('joinRoomButton').addEventListener('click', joinRoom);
 document.getElementById('roomCodeInput').addEventListener('keydown', (event) => { if (event.key === 'Enter') joinRoom(); });
 document.getElementById('worldSelect').addEventListener('change', sendLobbySettings);
-document.getElementById('factionSelect').addEventListener('change', sendLobbySettings);
+document.getElementById('challengeSelect').addEventListener('change', () => {
+  document.getElementById('challengeDescription').textContent = CHALLENGES[document.getElementById('challengeSelect').value]?.description || '';
+  sendLobbySettings();
+});
+document.getElementById('durationSelect').addEventListener('change', sendLobbySettings);
+document.getElementById('playerFactionSelect').addEventListener('change', sendPlayerFaction);
 document.getElementById('startMatchButton').addEventListener('click', async () => {
   try {
     const response = await emitWithAck('startMatch', {});
     if (!response?.ok) showMessage('lobbyMessage', response?.error || 'Could not start match.', true);
-    else if (response.match) await enterMultiplayerMatch(response.match);
+    else if (response.match) await enterMultiplayerMatch(response.match, response.snapshot || null);
   } catch (error) {
     showMessage('lobbyMessage', error.message, true);
   }
@@ -842,6 +989,17 @@ document.getElementById('leaveLobbyButton').addEventListener('click', () => {
   history.replaceState(null, '', location.pathname);
   showScreen('multiplayer');
 });
+
+
+document.getElementById('returnLobbyButton').addEventListener('click', async () => {
+  try {
+    const response = await emitWithAck('returnToLobby', {});
+    if (!response?.ok) showMessage('lobbyMessage', response?.error || 'Could not return to lobby.', true);
+  } catch (error) {
+    addFeed(error.message);
+  }
+});
+document.getElementById('resultLeaveButton').addEventListener('click', leaveCurrentGame);
 
 // Shared in-game controls
 

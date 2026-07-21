@@ -169,10 +169,16 @@
 
           <div id="leaderSettings" class="leader-settings hidden">
             <div class="section-title">Lobby leader settings</div>
-            <div class="settings-grid">
+            <div class="settings-grid leader-settings-grid">
               <label class="field"><span>World</span><select id="worldSelect"><option value="jungle">Emerald Jungle</option><option value="mountain">Frozen Mountain</option><option value="arena">Grand Combat Arena</option><option value="battlefield">Ruined Battleground</option><option value="space">Zero-G Space Station</option></select></label>
-              <label class="field"><span>Faction</span><select id="factionSelect"><option value="iron">Iron Legion — extra hull</option><option value="neon">Neon Wolves — extra speed</option><option value="solar">Solar Dominion — extra damage</option><option value="void">Void Syndicate — faster abilities</option></select></label>
+              <label class="field"><span>Challenge</span><select id="challengeSelect"><option value="team_deathmatch">Team Deathmatch</option><option value="control_zone">Control Zone</option><option value="salvage_rush">Salvage Rush</option></select></label>
+              <label class="field"><span>Time limit</span><select id="durationSelect"><option value="120">2 minutes</option><option value="180">3 minutes</option><option value="300" selected>5 minutes</option><option value="480">8 minutes</option><option value="600">10 minutes</option></select></label>
             </div>
+            <p id="challengeDescription" class="lobby-rule-text">Destroy enemy vehicles. Every elimination gives your faction 3 points.</p>
+          </div>
+
+          <div class="loadout-grid">
+            <label class="field"><span>Your faction / team</span><select id="playerFactionSelect"><option value="iron">Iron Legion — extra hull</option><option value="neon">Neon Wolves — extra speed</option><option value="solar">Solar Dominion — extra damage</option><option value="void">Void Syndicate — faster abilities</option></select></label>
           </div>
 
           <div class="section-title">Your vehicle</div>
@@ -188,7 +194,7 @@
         <aside class="menu-card player-panel">
           <div class="player-panel-title"><h3>Players</h3><span id="playerCountLabel">0 / 8</span></div>
           <div id="lobbyPlayerList" class="player-list"></div>
-          <div class="lobby-tip">The arena expands with player count. The lobby leader chooses the faction and world.</div>
+          <div class="lobby-tip">The arena expands with player count. Every player chooses a faction/team; the leader chooses the world, challenge and time limit.</div>
         </aside>
       </div>
     </section>
@@ -199,10 +205,13 @@
       <header class="hud top-hud">
         <div class="hud-card health-card"><span class="hud-label">HULL</span><div class="health-track"><div id="healthBar" class="health-fill"></div></div><strong id="healthText">0 / 0</strong></div>
         <div class="hud-card world-card"><span id="gameModeLabel" class="hud-label">CAMPAIGN</span><strong id="worldLabel">Emerald Jungle</strong><span id="subWorldLabel">Level 1</span></div>
+        <div class="hud-card timer-card hidden" id="multiplayerTimerCard"><span class="hud-label">TIME</span><strong id="matchTimerLabel">05:00</strong><span id="challengeHudLabel">Team Deathmatch</span></div>
         <div class="hud-card score-card"><span>K <strong id="killsLabel">0</strong></span><span id="deathHud">D <strong id="deathsLabel">0</strong></span><span>S <strong id="scoreLabel">0</strong></span><span id="coinHud">C <strong id="gameCoinsLabel">0</strong></span></div>
       </header>
 
       <aside class="hud player-roster hidden" id="gamePlayerList"></aside>
+      <aside class="hud team-score-panel hidden" id="teamScorePanel"></aside>
+      <div id="objectivePanel" class="hud objective-panel hidden"></div>
       <div id="bossPanel" class="hud boss-panel hidden"><div class="boss-heading"><span id="bossLabel">World Boss</span><strong id="bossHealthText">0 / 0</strong></div><div class="boss-track"><div id="bossHealthBar"></div></div></div>
       <div id="powerupBanner" class="powerup-banner hidden"></div>
       <div id="respawnOverlay" class="respawn-overlay hidden">Respawning…</div>
@@ -232,12 +241,27 @@
       <div id="singleGameOverOverlay" class="game-modal hidden">
         <div class="modal-card"><div class="eyebrow">VEHICLE DESTROYED</div><h2>MISSION FAILED</h2><p id="singleGameOverText" class="muted"></p><div class="modal-actions"><button id="retryLevelButton" class="primary large" type="button">Retry level</button><button id="gameOverExitButton" type="button">Campaign menu</button></div></div>
       </div>
+
+      <div id="multiplayerResultOverlay" class="game-modal hidden">
+        <div class="modal-card multiplayer-result-card">
+          <div class="eyebrow">MATCH COMPLETE</div>
+          <h2 id="matchResultTitle">Time limit reached</h2>
+          <p id="matchResultSubtitle" class="muted"></p>
+          <div id="matchTeamScores" class="result-team-grid"></div>
+          <div id="matchLeaderboard" class="result-leaderboard"></div>
+          <div class="modal-actions">
+            <button id="returnLobbyButton" class="primary large hidden" type="button">Return everyone to lobby</button>
+            <button id="waitForLeaderButton" type="button" disabled>Waiting for lobby leader…</button>
+            <button id="resultLeaveButton" type="button">Leave room</button>
+          </div>
+        </div>
+      </div>
     </section>
   </main>
 
   <div id="fatalError" class="fatal-error hidden"><strong>Game engine error</strong><span id="fatalErrorText"></span><button id="reloadButton" type="button">Reload</button></div>
 
   <script src="/socket.io/socket.io.js"></script>
-  <script src="/app.js?v=2.1.0"></script>
+  <script src="/app.js?v=3.0.0"></script>
 </body>
 </html>

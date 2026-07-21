@@ -11,18 +11,14 @@ const TICK_RATE = 30;
 const SNAPSHOT_RATE = 15;
 const MAX_PLAYERS = 8;
 const DISCONNECT_GRACE_MS = 30000;
-const INPUT_TIMEOUT_MS = 220;
+const INPUT_TIMEOUT_MS = 320;
+const CONTROL_ZONE_RADIUS = 6.5;
 
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server, {
   cors: { origin: true, credentials: false }
 });
-
-app.use(express.static(path.join(__dirname, 'public')));
-app.use('/vendor', express.static(path.join(__dirname, 'node_modules', 'three', 'build'), { maxAge: '1d', immutable: true }));
-app.get('/health', (_req, res) => res.json({ ok: true, rooms: rooms.size, players: [...rooms.values()].reduce((sum, room) => sum + room.players.size, 0) }));
-app.get('/api/status', (_req, res) => res.json({ ok: true, maxPlayers: MAX_PLAYERS, worlds: Object.keys(WORLDS), vehicles: Object.keys(VEHICLES) }));
 
 const rooms = new Map();
 
@@ -49,7 +45,45 @@ const WORLDS = {
   space: { name: 'Zero-G Space Station', traction: 0.62, bulletSpeed: 0.82, damage: 1, gravity: 0.25, obstacleBias: 'reactors' }
 };
 
+const CHALLENGES = {
+  team_deathmatch: {
+    name: 'Team Deathmatch',
+    description: 'Destroy enemy vehicles. Every elimination gives your faction 3 points.',
+    killPoints: 3,
+    pickupPoints: 0
+  },
+  control_zone: {
+    name: 'Control Zone',
+    description: 'Hold the central zone. Exclusive control gives 1 point per second; eliminations give 1 point.',
+    killPoints: 1,
+    pickupPoints: 0
+  },
+  salvage_rush: {
+    name: 'Salvage Rush',
+    description: 'Collect battlefield power-ups. Pickups give 2 points, rare cores give 3, and eliminations give 1.',
+    killPoints: 1,
+    pickupPoints: 2
+  }
+};
+
+const ALLOWED_DURATIONS = new Set([120, 180, 300, 480, 600]);
 const POWERUP_TYPES = ['heal', 'shield', 'rapid', 'speed', 'godmode', 'morph'];
+
+app.use(express.static(path.join(__dirname, 'public')));
+app.use('/vendor', express.static(path.join(__dirname, 'node_modules', 'three', 'build'), { maxAge: '1d', immutable: true }));
+app.get('/health', (_req, res) => res.json({
+  ok: true,
+  rooms: rooms.size,
+  players: [...rooms.values()].reduce((sum, room) => sum + room.players.size, 0)
+}));
+app.get('/api/status', (_req, res) => res.json({
+  ok: true,
+  maxPlayers: MAX_PLAYERS,
+  worlds: Object.keys(WORLDS),
+  vehicles: Object.keys(VEHICLES),
+  factions: Object.keys(FACTIONS),
+  challenges: Object.keys(CHALLENGES)
+}));
 
 function now() {
   return Date.now();
@@ -57,6 +91,10 @@ function now() {
 
 function makeId() {
   return crypto.randomUUID();
+}
+
+function clamp(value, minimum, maximum) {
+  return Math.max(minimum, Math.min(maximum, value));
 }
 
 function sanitizeName(value) {
@@ -68,24 +106,30 @@ function sanitizeVehicle(value) {
   return VEHICLES[value] ? value : 'vanguard';
 }
 
+function sanitizeFaction(value) {
+  return FACTIONS[value] ? value : 'iron';
+}
+
 function sanitizeClientId(value) {
   const clean = String(value || '').trim().replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 64);
   return clean || crypto.randomUUID();
 }
 
-function clearPlayerInput(player) {
-  player.input.forward = false;
-  player.input.backward = false;
-  player.input.left = false;
-  player.input.right = false;
-  player.input.fire = false;
+function sanitizeDuration(value) {
+  const seconds = Math.round(Number(value));
+  if (process.env.IRONFRONT_TEST_DURATION === '1' && seconds >= 2 && seconds <= 30) return seconds;
+  return ALLOWED_DURATIONS.has(seconds) ? seconds : 300;
+}
+
+function sanitizeChallenge(value) {
+  return CHALLENGES[value] ? value : 'team_deathmatch';
 }
 
 function makeRoomCode() {
   const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
   for (let attempt = 0; attempt < 100; attempt += 1) {
     let code = '';
-    for (let i = 0; i < 5; i += 1) code += alphabet[Math.floor(Math.random() * alphabet.length)];
+    for (let index = 0; index < 5; index += 1) code += alphabet[Math.floor(Math.random() * alphabet.length)];
     if (!rooms.has(code)) return code;
   }
   return crypto.randomBytes(3).toString('hex').toUpperCase();
@@ -95,20 +139,62 @@ function seededRandom(seed) {
   let value = seed >>> 0;
   return () => {
     value += 0x6D2B79F5;
-    let t = value;
-    t = Math.imul(t ^ (t >>> 15), t | 1);
-    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    let temporary = value;
+    temporary = Math.imul(temporary ^ (temporary >>> 15), temporary | 1);
+    temporary ^= temporary + Math.imul(temporary ^ (temporary >>> 7), temporary | 61);
+    return ((temporary ^ (temporary >>> 14)) >>> 0) / 4294967296;
   };
 }
 
 function hashCode(text) {
   let hash = 2166136261;
-  for (let i = 0; i < text.length; i += 1) {
-    hash ^= text.charCodeAt(i);
+  for (let index = 0; index < text.length; index += 1) {
+    hash ^= text.charCodeAt(index);
     hash = Math.imul(hash, 16777619);
   }
   return hash >>> 0;
+}
+
+function emptyTeamScores() {
+  return Object.fromEntries(Object.keys(FACTIONS).map((faction) => [faction, 0]));
+}
+
+function clearPlayerControl(player) {
+  player.control.move = 0;
+  player.control.turn = 0;
+  player.control.fire = false;
+}
+
+function createPlayer(socket, payload) {
+  const id = sanitizeClientId(payload?.clientId);
+  return {
+    id,
+    socketId: socket.id,
+    name: sanitizeName(payload?.name),
+    vehicle: sanitizeVehicle(payload?.vehicle),
+    faction: sanitizeFaction(payload?.faction),
+    connected: true,
+    disconnectedAt: 0,
+    lastControlAt: now(),
+    lastControlSequence: -1,
+    control: { move: 0, turn: 0, fire: false },
+    x: 0,
+    z: 0,
+    angle: 0,
+    hp: 1,
+    maxHp: 1,
+    score: 0,
+    kills: 0,
+    deaths: 0,
+    objectiveScore: 0,
+    dead: false,
+    respawnAt: 0,
+    nextShotAt: 0,
+    abilityCooldownUntil: 0,
+    abilityUntil: 0,
+    power: null,
+    powerUntil: 0
+  };
 }
 
 function publicLobby(room) {
@@ -121,9 +207,11 @@ function publicLobby(room) {
       id: player.id,
       name: player.name,
       vehicle: player.vehicle,
+      faction: player.faction,
       connected: player.connected
     })),
-    maxPlayers: MAX_PLAYERS
+    maxPlayers: MAX_PLAYERS,
+    result: room.result
   };
 }
 
@@ -131,55 +219,26 @@ function emitLobby(room) {
   io.to(room.code).emit('lobbyState', publicLobby(room));
 }
 
-function createPlayer(socket, payload) {
-  const id = sanitizeClientId(payload?.clientId);
-  return {
-    id,
-    socketId: socket.id,
-    name: sanitizeName(payload?.name),
-    vehicle: sanitizeVehicle(payload?.vehicle),
-    connected: true,
-    disconnectedAt: 0,
-    lastInputAt: now(),
-    input: { forward: false, backward: false, left: false, right: false, fire: false },
-    x: 0,
-    z: 0,
-    angle: 0,
-    hp: 1,
-    maxHp: 1,
-    score: 0,
-    kills: 0,
-    deaths: 0,
-    dead: false,
-    respawnAt: 0,
-    lastFireAt: 0,
-    abilityCooldownUntil: 0,
-    abilityUntil: 0,
-    power: null,
-    powerUntil: 0
-  };
-}
-
-function getFactionStats(room) {
-  return FACTIONS[room.settings.faction] || FACTIONS.iron;
+function getFactionStats(player) {
+  return FACTIONS[player.faction] || FACTIONS.iron;
 }
 
 function getWorldStats(room) {
   return WORLDS[room.settings.world] || WORLDS.jungle;
 }
 
-function getPlayerStats(room, player) {
+function getPlayerStats(room, player, time = now()) {
   const base = VEHICLES[player.vehicle] || VEHICLES.vanguard;
-  const faction = getFactionStats(room);
-  const rapid = player.power === 'rapid' && player.powerUntil > now();
-  const speedBoost = player.power === 'speed' && player.powerUntil > now();
-  const godmode = player.power === 'godmode' && player.powerUntil > now();
-  const abilityRapid = player.vehicle === 'striker' && player.abilityUntil > now();
+  const faction = getFactionStats(player);
+  const rapidPower = player.power === 'rapid' && player.powerUntil > time;
+  const speedPower = player.power === 'speed' && player.powerUntil > time;
+  const godmode = player.power === 'godmode' && player.powerUntil > time;
+  const abilityRapid = player.vehicle === 'striker' && player.abilityUntil > time;
   return {
     hp: Math.round(base.hp * faction.hp),
-    speed: base.speed * faction.speed * (speedBoost || godmode ? 1.55 : 1),
+    speed: base.speed * faction.speed * (speedPower || godmode ? 1.55 : 1),
     damage: base.damage * faction.damage * (godmode ? 1.8 : 1),
-    reload: base.reload * faction.cooldown * (rapid || abilityRapid || godmode ? 0.38 : 1),
+    reload: base.reload * faction.cooldown * (rapidPower || abilityRapid || godmode ? 0.38 : 1),
     radius: base.radius
   };
 }
@@ -195,75 +254,133 @@ function moveWithCollision(room, player, dx, dz) {
   if (!collides(room, player.x, player.z + dz, radius)) player.z += dz;
 }
 
+function segmentCircleHit(x1, z1, x2, z2, cx, cz, radius) {
+  const dx = x2 - x1;
+  const dz = z2 - z1;
+  const lengthSquared = dx * dx + dz * dz;
+  if (lengthSquared <= 0.000001) return Math.hypot(x1 - cx, z1 - cz) <= radius;
+  const projection = clamp(((cx - x1) * dx + (cz - z1) * dz) / lengthSquared, 0, 1);
+  const closestX = x1 + dx * projection;
+  const closestZ = z1 + dz * projection;
+  return Math.hypot(closestX - cx, closestZ - cz) <= radius;
+}
+
+function projectileHitsObstacle(room, projectile, nextX, nextZ) {
+  if (Math.hypot(nextX, nextZ) > room.radius + 1) return true;
+  return room.obstacles.some((obstacle) => segmentCircleHit(
+    projectile.x,
+    projectile.z,
+    nextX,
+    nextZ,
+    obstacle.x,
+    obstacle.z,
+    obstacle.r + projectile.radius
+  ));
+}
+
 function generateObstacles(room) {
   const random = seededRandom(room.seed);
-  const count = Math.min(22, 5 + room.players.size * 2);
+  const count = Math.min(24, 5 + room.players.size * 2);
   const obstacles = [];
-  for (let i = 0; i < count; i += 1) {
+  for (let index = 0; index < count; index += 1) {
     let x = 0;
     let z = 0;
-    let r = 1.4 + random() * 1.7;
+    const radius = 1.4 + random() * 1.7;
     let safe = false;
-    for (let attempt = 0; attempt < 50 && !safe; attempt += 1) {
+    for (let attempt = 0; attempt < 60 && !safe; attempt += 1) {
       const angle = random() * Math.PI * 2;
-      const distance = 7 + random() * (room.radius - 11);
+      const distance = 9 + random() * Math.max(4, room.radius - 14);
       x = Math.cos(angle) * distance;
       z = Math.sin(angle) * distance;
-      safe = obstacles.every((other) => Math.hypot(x - other.x, z - other.z) > r + other.r + 2.2);
+      const clearCenter = Math.hypot(x, z) > CONTROL_ZONE_RADIUS + radius + 3;
+      safe = clearCenter && obstacles.every((other) => Math.hypot(x - other.x, z - other.z) > radius + other.r + 2.2);
     }
-    if (safe) obstacles.push({ id: makeId(), x, z, r, variant: i % 4 });
+    if (safe) obstacles.push({ id: makeId(), x, z, r: radius, variant: index % 4 });
   }
   return obstacles;
 }
 
 function spawnPlayers(room) {
-  const faction = getFactionStats(room);
-  const players = [...room.players.values()];
+  const factionMembers = new Map(Object.keys(FACTIONS).map((faction) => [faction, []]));
+  for (const player of room.players.values()) factionMembers.get(player.faction).push(player);
   const occupied = [];
+  const factionOrder = Object.keys(FACTIONS);
 
-  players.forEach((player, index) => {
-    const preferredAngle = (index / Math.max(1, players.length)) * Math.PI * 2;
-    const preferredDistance = Math.min(12, room.radius * 0.35);
-    const radius = getPlayerStats(room, player).radius;
-    let x = Math.cos(preferredAngle) * preferredDistance;
-    let z = Math.sin(preferredAngle) * preferredDistance;
-    let safe = !collides(room, x, z, radius);
+  for (const [faction, members] of factionMembers) {
+    const factionIndex = factionOrder.indexOf(faction);
+    const baseAngle = factionIndex / factionOrder.length * Math.PI * 2;
+    members.forEach((player, memberIndex) => {
+      const radius = getPlayerStats(room, player).radius;
+      let x = 0;
+      let z = 0;
+      let safe = false;
+      for (let attempt = 0; attempt < 90 && !safe; attempt += 1) {
+        const angle = baseAngle + (memberIndex - (members.length - 1) / 2) * 0.28 + attempt * 0.19;
+        const distance = Math.min(room.radius - 6, room.radius * 0.58 + (attempt % 5) * 1.1);
+        x = Math.cos(angle) * distance;
+        z = Math.sin(angle) * distance;
+        safe = !collides(room, x, z, radius) && occupied.every((other) => Math.hypot(x - other.x, z - other.z) > radius + other.radius + 2.4);
+      }
 
-    for (let attempt = 0; attempt < 80 && !safe; attempt += 1) {
-      const angle = preferredAngle + attempt * 0.55;
-      const distance = 5 + (attempt % 6) * Math.max(2.2, (room.radius - 10) / 6);
-      x = Math.cos(angle) * Math.min(distance, room.radius - 5);
-      z = Math.sin(angle) * Math.min(distance, room.radius - 5);
-      safe = !collides(room, x, z, radius) && occupied.every((other) => Math.hypot(x - other.x, z - other.z) > radius + other.radius + 2);
+      player.x = x;
+      player.z = z;
+      player.angle = Math.atan2(-x, z);
+      player.score = 0;
+      player.kills = 0;
+      player.deaths = 0;
+      player.objectiveScore = 0;
+      player.dead = false;
+      player.respawnAt = 0;
+      player.power = null;
+      player.powerUntil = 0;
+      player.abilityUntil = 0;
+      player.abilityCooldownUntil = 0;
+      player.nextShotAt = 0;
+      player.lastControlAt = now();
+      player.lastControlSequence = -1;
+      clearPlayerControl(player);
+      player.maxHp = getPlayerStats(room, player).hp;
+      player.hp = player.maxHp;
+      occupied.push({ x, z, radius });
+    });
+  }
+}
+
+function respawnPlayer(room, player) {
+  const factionPlayers = [...room.players.values()].filter((candidate) => candidate.faction === player.faction && !candidate.dead && candidate.id !== player.id);
+  const anchor = factionPlayers[0];
+  const baseAngle = anchor ? Math.atan2(anchor.z, anchor.x) : Object.keys(FACTIONS).indexOf(player.faction) / 4 * Math.PI * 2;
+  const radius = getPlayerStats(room, player).radius;
+
+  for (let attempt = 0; attempt < 70; attempt += 1) {
+    const angle = baseAngle + (Math.random() - 0.5) * 0.8 + attempt * 0.17;
+    const distance = Math.min(room.radius - 5, room.radius * 0.58 + (attempt % 4));
+    const x = Math.cos(angle) * distance;
+    const z = Math.sin(angle) * distance;
+    if (!collides(room, x, z, radius)) {
+      player.x = x;
+      player.z = z;
+      player.angle = Math.atan2(-x, z);
+      break;
     }
+  }
 
-    player.x = x;
-    player.z = z;
-    player.angle = Math.atan2(-x, z);
-    player.score = 0;
-    player.kills = 0;
-    player.deaths = 0;
-    player.dead = false;
-    player.respawnAt = 0;
-    player.power = null;
-    player.powerUntil = 0;
-    player.abilityUntil = 0;
-    player.abilityCooldownUntil = 0;
-    player.lastInputAt = now();
-    clearPlayerInput(player);
-    const base = VEHICLES[player.vehicle];
-    player.maxHp = Math.round(base.hp * faction.hp);
-    player.hp = player.maxHp;
-    occupied.push({ x, z, radius });
-  });
+  player.dead = false;
+  player.power = null;
+  player.powerUntil = 0;
+  player.abilityUntil = 0;
+  player.nextShotAt = now() + 650;
+  player.maxHp = getPlayerStats(room, player).hp;
+  player.hp = player.maxHp;
+  clearPlayerControl(player);
 }
 
 function spawnPowerup(room, forcedType = null) {
-  if (room.powerups.length >= Math.min(5, 2 + Math.ceil(room.players.size / 2))) return;
+  if (room.powerups.length >= Math.min(6, 2 + Math.ceil(room.players.size / 2))) return;
   const type = forcedType || POWERUP_TYPES[Math.floor(Math.random() * POWERUP_TYPES.length)];
-  for (let attempt = 0; attempt < 40; attempt += 1) {
+  for (let attempt = 0; attempt < 50; attempt += 1) {
     const angle = Math.random() * Math.PI * 2;
-    const distance = 4 + Math.random() * (room.radius - 8);
+    const distance = 4 + Math.random() * Math.max(4, room.radius - 8);
     const x = Math.cos(angle) * distance;
     const z = Math.sin(angle) * distance;
     if (!collides(room, x, z, 1)) {
@@ -273,25 +390,9 @@ function spawnPowerup(room, forcedType = null) {
   }
 }
 
-function respawnPlayer(room, player) {
-  for (let attempt = 0; attempt < 40; attempt += 1) {
-    const angle = Math.random() * Math.PI * 2;
-    const distance = Math.random() * Math.max(3, room.radius - 8);
-    const x = Math.cos(angle) * distance;
-    const z = Math.sin(angle) * distance;
-    if (!collides(room, x, z, getPlayerStats(room, player).radius)) {
-      player.x = x;
-      player.z = z;
-      player.angle = Math.random() * Math.PI * 2;
-      break;
-    }
-  }
-  player.dead = false;
-  player.power = null;
-  player.powerUntil = 0;
-  player.abilityUntil = 0;
-  player.maxHp = getPlayerStats(room, player).hp;
-  player.hp = player.maxHp;
+function addTeamScore(room, faction, amount) {
+  if (!FACTIONS[faction] || !Number.isFinite(amount)) return;
+  room.teamScores[faction] = Math.max(0, (room.teamScores[faction] || 0) + amount);
 }
 
 function applyPowerup(room, player, powerup) {
@@ -309,36 +410,65 @@ function applyPowerup(room, player, powerup) {
     player.power = powerup.type;
     player.powerUntil = time + (powerup.type === 'godmode' ? 6500 : 10000);
   }
+
+  if (room.settings.challenge === 'salvage_rush') {
+    const points = powerup.type === 'morph' || powerup.type === 'godmode' ? 3 : CHALLENGES.salvage_rush.pickupPoints;
+    addTeamScore(room, player.faction, points);
+    player.objectiveScore += points;
+  }
+
   io.to(room.code).emit('powerupCollected', {
     playerId: player.id,
     playerName: player.name,
+    faction: player.faction,
     type: powerup.type,
     vehicle: player.vehicle
   });
 }
 
-function spawnBullet(room, player, angleOffset = 0, damageMultiplier = 1) {
+function spawnProjectile(room, player, angleOffset = 0, options = {}) {
+  const time = now();
   const world = getWorldStats(room);
-  const stats = getPlayerStats(room, player);
+  const stats = getPlayerStats(room, player, time);
   const angle = player.angle + angleOffset;
-  const speed = 23 * world.bulletSpeed;
-  room.bullets.push({
+  const speed = 23 * world.bulletSpeed * (options.speedMultiplier || 1);
+  const radius = options.explosive ? 0.42 : 0.23;
+  const muzzleDistance = stats.radius + 1.05;
+  room.projectiles.push({
     id: makeId(),
     ownerId: player.id,
-    x: player.x + Math.sin(angle) * (stats.radius + 1),
-    z: player.z - Math.cos(angle) * (stats.radius + 1),
+    ownerFaction: player.faction,
+    x: player.x + Math.sin(angle) * muzzleDistance,
+    z: player.z - Math.cos(angle) * muzzleDistance,
     vx: Math.sin(angle) * speed,
     vz: -Math.cos(angle) * speed,
-    damage: stats.damage * world.damage * damageMultiplier,
-    radius: damageMultiplier > 1.4 ? 0.45 : 0.25,
-    expiresAt: now() + (room.settings.world === 'space' ? 4500 : 3000)
+    damage: stats.damage * world.damage * (options.damageMultiplier || 1),
+    radius,
+    explosive: Boolean(options.explosive),
+    expiresAt: time + (room.settings.world === 'space' ? 4700 : 3200)
   });
+}
+
+function fireVehicleWeapon(room, player, time) {
+  const stats = getPlayerStats(room, player, time);
+  if (time < player.nextShotAt) return;
+  const rapidAbility = player.vehicle === 'striker' && player.abilityUntil > time;
+  const godmode = player.power === 'godmode' && player.powerUntil > time;
+
+  if (rapidAbility) {
+    spawnProjectile(room, player, -0.075, { explosive: godmode });
+    spawnProjectile(room, player, 0.075, { explosive: godmode });
+  } else {
+    spawnProjectile(room, player, 0, { explosive: godmode });
+  }
+
+  player.nextShotAt = time + Math.max(70, stats.reload);
 }
 
 function useAbility(room, player) {
   const time = now();
-  if (player.dead || player.abilityCooldownUntil > time) return;
-  const faction = getFactionStats(room);
+  if (player.dead || player.abilityCooldownUntil > time || room.status !== 'playing') return;
+  const faction = getFactionStats(player);
   player.abilityCooldownUntil = time + 16000 * faction.cooldown;
 
   if (player.vehicle === 'vanguard') {
@@ -349,15 +479,15 @@ function useAbility(room, player) {
     player.abilityUntil = time + 4500;
   } else if (player.vehicle === 'annihilator') {
     for (const target of room.players.values()) {
-      if (target.id === player.id || target.dead) continue;
+      if (target.id === player.id || target.dead || target.faction === player.faction) continue;
       if (Math.hypot(target.x - player.x, target.z - player.z) <= 8.5) {
-        target.hp -= getPlayerStats(room, player).damage * 1.7;
+        target.hp -= getPlayerStats(room, player, time).damage * 1.7;
         if (target.hp <= 0) killPlayer(room, target, player.id);
       }
     }
     io.to(room.code).emit('shockwave', { playerId: player.id, x: player.x, z: player.z });
   } else if (player.vehicle === 'titan') {
-    [-0.32, -0.16, 0, 0.16, 0.32].forEach((offset) => spawnBullet(room, player, offset, 1.35));
+    [-0.32, -0.16, 0, 0.16, 0.32].forEach((offset) => spawnProjectile(room, player, offset, { explosive: true, damageMultiplier: 1.35 }));
   }
 }
 
@@ -367,93 +497,112 @@ function killPlayer(room, victim, killerId) {
   victim.hp = 0;
   victim.deaths += 1;
   victim.respawnAt = now() + 3000;
+  clearPlayerControl(victim);
+
   if (killerId && killerId !== victim.id) {
     const killer = room.players.get(killerId);
-    if (killer) {
+    if (killer && killer.faction !== victim.faction) {
       killer.kills += 1;
       killer.score += 100;
+      addTeamScore(room, killer.faction, CHALLENGES[room.settings.challenge].killPoints);
     }
   }
-  io.to(room.code).emit('playerDestroyed', { victimId: victim.id, killerId });
+
+  io.to(room.code).emit('playerDestroyed', {
+    victimId: victim.id,
+    victimName: victim.name,
+    victimFaction: victim.faction,
+    killerId
+  });
 }
 
-function updateRoom(room, dt) {
-  if (room.status !== 'playing') return;
-  const time = now();
-  const world = getWorldStats(room);
-
+function updateControlZone(room, dt) {
+  if (room.settings.challenge !== 'control_zone') return;
+  const factionsInZone = new Set();
   for (const player of room.players.values()) {
-    if (!player.connected) continue;
-    if (time - player.lastInputAt > INPUT_TIMEOUT_MS) clearPlayerInput(player);
-    if (player.dead) {
-      if (time >= player.respawnAt) respawnPlayer(room, player);
-      continue;
-    }
+    if (!player.connected || player.dead) continue;
+    if (Math.hypot(player.x, player.z) <= CONTROL_ZONE_RADIUS) factionsInZone.add(player.faction);
+  }
 
-    const stats = getPlayerStats(room, player);
-    const turn = (player.input.right ? 1 : 0) - (player.input.left ? 1 : 0);
-    const drive = (player.input.forward ? 1 : 0) - (player.input.backward ? 1 : 0);
-    player.angle += turn * dt * 2.45 * world.traction;
+  const controllingFaction = factionsInZone.size === 1 ? [...factionsInZone][0] : null;
+  if (controllingFaction && room.objective.controlFaction === controllingFaction) {
+    room.objective.controlAccumulator += dt;
+  } else {
+    room.objective.controlFaction = controllingFaction;
+    room.objective.controlAccumulator = 0;
+  }
 
-    if (drive !== 0) {
-      const phase = player.vehicle === 'spectre' && player.abilityUntil > time;
-      const speed = stats.speed * world.traction * (phase ? 1.65 : 1);
-      const dx = Math.sin(player.angle) * drive * speed * dt;
-      const dz = -Math.cos(player.angle) * drive * speed * dt;
-      moveWithCollision(room, player, dx, dz);
-    }
-
-    if (player.input.fire && time - player.lastFireAt >= stats.reload) {
-      player.lastFireAt = time;
-      if (player.vehicle === 'striker' && player.abilityUntil > time) {
-        spawnBullet(room, player, -0.08);
-        spawnBullet(room, player, 0.08);
-      } else {
-        spawnBullet(room, player);
+  while (room.objective.controlAccumulator >= 1) {
+    room.objective.controlAccumulator -= 1;
+    addTeamScore(room, controllingFaction, 1);
+    for (const player of room.players.values()) {
+      if (player.faction === controllingFaction && !player.dead && Math.hypot(player.x, player.z) <= CONTROL_ZONE_RADIUS) {
+        player.objectiveScore += 1;
       }
     }
   }
+}
 
-  for (let i = room.bullets.length - 1; i >= 0; i -= 1) {
-    const bullet = room.bullets[i];
-    bullet.x += bullet.vx * dt;
-    bullet.z += bullet.vz * dt;
+function updateProjectiles(room, dt, time) {
+  for (let index = room.projectiles.length - 1; index >= 0; index -= 1) {
+    const projectile = room.projectiles[index];
+    const nextX = projectile.x + projectile.vx * dt;
+    const nextZ = projectile.z + projectile.vz * dt;
 
-    if (time >= bullet.expiresAt || Math.hypot(bullet.x, bullet.z) > room.radius + 2 || collides(room, bullet.x, bullet.z, bullet.radius)) {
-      room.bullets.splice(i, 1);
+    if (time >= projectile.expiresAt || projectileHitsObstacle(room, projectile, nextX, nextZ)) {
+      room.projectiles.splice(index, 1);
       continue;
     }
 
-    let removed = false;
+    let hitTarget = null;
     for (const target of room.players.values()) {
-      if (target.id === bullet.ownerId || target.dead) continue;
-      const stats = getPlayerStats(room, target);
-      if (Math.hypot(target.x - bullet.x, target.z - bullet.z) <= stats.radius + bullet.radius) {
-        const phase = target.vehicle === 'spectre' && target.abilityUntil > time;
-        const shield = target.power === 'shield' && target.powerUntil > time;
-        const godmode = target.power === 'godmode' && target.powerUntil > time;
-        const fortress = target.vehicle === 'vanguard' && target.abilityUntil > time;
-        if (!phase && !godmode) {
-          const multiplier = fortress ? 0.16 : shield ? 0.25 : 1;
-          target.hp -= bullet.damage * multiplier;
-          if (target.hp <= 0) killPlayer(room, target, bullet.ownerId);
-        }
-        room.bullets.splice(i, 1);
-        removed = true;
+      if (target.id === projectile.ownerId || target.dead || target.faction === projectile.ownerFaction) continue;
+      const stats = getPlayerStats(room, target, time);
+      if (segmentCircleHit(projectile.x, projectile.z, nextX, nextZ, target.x, target.z, stats.radius + projectile.radius)) {
+        hitTarget = target;
         break;
       }
     }
-    if (removed) continue;
-  }
 
+    if (hitTarget) {
+      const phase = hitTarget.vehicle === 'spectre' && hitTarget.abilityUntil > time;
+      const shield = hitTarget.power === 'shield' && hitTarget.powerUntil > time;
+      const godmode = hitTarget.power === 'godmode' && hitTarget.powerUntil > time;
+      const fortress = hitTarget.vehicle === 'vanguard' && hitTarget.abilityUntil > time;
+      if (!phase && !godmode) {
+        const multiplier = fortress ? 0.16 : shield ? 0.25 : 1;
+        hitTarget.hp -= projectile.damage * multiplier;
+        if (hitTarget.hp <= 0) killPlayer(room, hitTarget, projectile.ownerId);
+      }
+
+      if (projectile.explosive) {
+        for (const target of room.players.values()) {
+          if (target.dead || target.faction === projectile.ownerFaction || target.id === hitTarget.id) continue;
+          if (Math.hypot(target.x - nextX, target.z - nextZ) <= 4.5) {
+            target.hp -= projectile.damage * 0.45;
+            if (target.hp <= 0) killPlayer(room, target, projectile.ownerId);
+          }
+        }
+      }
+
+      room.projectiles.splice(index, 1);
+      continue;
+    }
+
+    projectile.x = nextX;
+    projectile.z = nextZ;
+  }
+}
+
+function updatePowerups(room, time) {
   room.powerups = room.powerups.filter((powerup) => time < powerup.expiresAt);
   for (const player of room.players.values()) {
     if (player.dead) continue;
-    for (let i = room.powerups.length - 1; i >= 0; i -= 1) {
-      const powerup = room.powerups[i];
-      if (Math.hypot(player.x - powerup.x, player.z - powerup.z) < getPlayerStats(room, player).radius + 1.1) {
+    for (let index = room.powerups.length - 1; index >= 0; index -= 1) {
+      const powerup = room.powerups[index];
+      if (Math.hypot(player.x - powerup.x, player.z - powerup.z) < getPlayerStats(room, player, time).radius + 1.1) {
         applyPowerup(room, player, powerup);
-        room.powerups.splice(i, 1);
+        room.powerups.splice(index, 1);
       }
     }
   }
@@ -461,8 +610,78 @@ function updateRoom(room, dt) {
   if (time >= room.nextPowerupAt) {
     const morphChance = Math.random() < 0.22;
     spawnPowerup(room, morphChance ? 'morph' : null);
-    room.nextPowerupAt = time + 5500 + Math.random() * 3500;
+    room.nextPowerupAt = time + 5200 + Math.random() * 3200;
   }
+}
+
+function finishMatch(room) {
+  if (room.status !== 'playing') return;
+  room.status = 'finished';
+  room.finishedAt = now();
+  for (const player of room.players.values()) clearPlayerControl(player);
+
+  const activeFactions = [...new Set([...room.players.values()].map((player) => player.faction))];
+  const highestTeamScore = Math.max(0, ...activeFactions.map((faction) => room.teamScores[faction] || 0));
+  const winningFactions = activeFactions.filter((faction) => (room.teamScores[faction] || 0) === highestTeamScore);
+  const leaderboard = [...room.players.values()]
+    .map((player) => ({
+      id: player.id,
+      name: player.name,
+      faction: player.faction,
+      vehicle: player.vehicle,
+      kills: player.kills,
+      deaths: player.deaths,
+      score: player.score,
+      objectiveScore: player.objectiveScore
+    }))
+    .sort((a, b) => (b.kills - a.kills) || (b.objectiveScore - a.objectiveScore) || (b.score - a.score));
+
+  room.result = {
+    endedAt: room.finishedAt,
+    challenge: room.settings.challenge,
+    challengeName: CHALLENGES[room.settings.challenge].name,
+    teamScores: { ...room.teamScores },
+    winningFactions,
+    leaderboard
+  };
+
+  io.to(room.code).emit('matchEnded', room.result);
+  emitLobby(room);
+}
+
+function updateRoom(room, dt) {
+  if (room.status !== 'playing') return;
+  const time = now();
+  if (time >= room.endsAt) {
+    finishMatch(room);
+    return;
+  }
+
+  const world = getWorldStats(room);
+  for (const player of room.players.values()) {
+    if (!player.connected) continue;
+    if (time - player.lastControlAt > INPUT_TIMEOUT_MS) clearPlayerControl(player);
+    if (player.dead) {
+      if (time >= player.respawnAt) respawnPlayer(room, player);
+      continue;
+    }
+
+    const stats = getPlayerStats(room, player, time);
+    player.angle += player.control.turn * dt * 2.45 * world.traction;
+    if (player.control.move !== 0) {
+      const phase = player.vehicle === 'spectre' && player.abilityUntil > time;
+      const speed = stats.speed * world.traction * (phase ? 1.65 : 1);
+      const dx = Math.sin(player.angle) * player.control.move * speed * dt;
+      const dz = -Math.cos(player.angle) * player.control.move * speed * dt;
+      moveWithCollision(room, player, dx, dz);
+    }
+
+    if (player.control.fire) fireVehicleWeapon(room, player, time);
+  }
+
+  updateProjectiles(room, dt, time);
+  updatePowerups(room, time);
+  updateControlZone(room, dt);
 }
 
 function snapshot(room) {
@@ -470,12 +689,22 @@ function snapshot(room) {
   return {
     serverTime: time,
     roomCode: room.code,
+    status: room.status,
     radius: room.radius,
     settings: { ...room.settings },
+    startedAt: room.startedAt,
+    endsAt: room.endsAt,
+    remainingMs: Math.max(0, room.endsAt - time),
+    teamScores: { ...room.teamScores },
+    objective: {
+      controlFaction: room.objective.controlFaction,
+      controlRadius: CONTROL_ZONE_RADIUS
+    },
     players: [...room.players.values()].map((player) => ({
       id: player.id,
       name: player.name,
       vehicle: player.vehicle,
+      faction: player.faction,
       connected: player.connected,
       x: player.x,
       z: player.z,
@@ -485,6 +714,7 @@ function snapshot(room) {
       score: player.score,
       kills: player.kills,
       deaths: player.deaths,
+      objectiveScore: player.objectiveScore,
       dead: player.dead,
       respawnAt: player.respawnAt,
       abilityCooldownUntil: player.abilityCooldownUntil,
@@ -492,7 +722,7 @@ function snapshot(room) {
       power: player.powerUntil > time ? player.power : null,
       powerUntil: player.powerUntil
     })),
-    bullets: room.bullets,
+    bullets: room.projectiles,
     powerups: room.powerups
   };
 }
@@ -502,24 +732,53 @@ function matchPayload(room) {
     roomCode: room.code,
     radius: room.radius,
     settings: { ...room.settings },
+    startedAt: room.startedAt,
+    endsAt: room.endsAt,
     seed: room.seed,
     obstacles: room.obstacles,
     vehicles: VEHICLES,
     factions: FACTIONS,
-    worlds: WORLDS
+    worlds: WORLDS,
+    challenges: CHALLENGES,
+    controlZoneRadius: CONTROL_ZONE_RADIUS
   };
 }
 
 function startMatch(room) {
   room.status = 'playing';
+  room.result = null;
   room.radius = 28 + Math.max(0, room.players.size - 1) * 4.5;
   room.seed = hashCode(`${room.code}-${now()}`);
-  room.bullets = [];
+  room.projectiles = [];
   room.powerups = [];
-  room.nextPowerupAt = now() + 4000;
+  room.teamScores = emptyTeamScores();
+  room.objective = { controlFaction: null, controlAccumulator: 0 };
+  room.nextPowerupAt = now() + 3500;
   room.obstacles = generateObstacles(room);
+  room.startedAt = now() + 500;
+  room.endsAt = room.startedAt + room.settings.durationSeconds * 1000;
   spawnPlayers(room);
   io.to(room.code).emit('matchStarted', matchPayload(room));
+  emitLobby(room);
+}
+
+function resetRoomToLobby(room) {
+  room.status = 'lobby';
+  room.result = null;
+  room.startedAt = 0;
+  room.endsAt = 0;
+  room.projectiles = [];
+  room.powerups = [];
+  room.obstacles = [];
+  room.teamScores = emptyTeamScores();
+  room.objective = { controlFaction: null, controlAccumulator: 0 };
+  for (const player of room.players.values()) {
+    clearPlayerControl(player);
+    player.dead = false;
+    player.hp = 1;
+    player.maxHp = 1;
+  }
+  io.to(room.code).emit('returnedToLobby', publicLobby(room));
   emitLobby(room);
 }
 
@@ -558,12 +817,11 @@ function detachPlayerSocket(socket) {
   if (!room) return;
 
   const player = room.players.get(playerId);
-  if (!player) return;
-  if (player.socketId && player.socketId !== socket.id) return;
+  if (!player || (player.socketId && player.socketId !== socket.id)) return;
   player.connected = false;
   player.socketId = null;
   player.disconnectedAt = now();
-  clearPlayerInput(player);
+  clearPlayerControl(player);
   emitLobby(room);
 }
 
@@ -577,12 +835,14 @@ function attachPlayerSocket(room, player, socket) {
       previousSocket.emit('sessionReplaced');
     }
   }
+
   room.players.set(player.id, player);
   player.socketId = socket.id;
   player.connected = true;
   player.disconnectedAt = 0;
-  player.lastInputAt = now();
-  clearPlayerInput(player);
+  player.lastControlAt = now();
+  player.lastControlSequence = -1;
+  clearPlayerControl(player);
   socket.join(room.code);
   socket.data.roomCode = room.code;
   socket.data.playerId = player.id;
@@ -615,14 +875,24 @@ io.on('connection', (socket) => {
         code,
         leaderId: player.id,
         status: 'lobby',
-        settings: { world: 'jungle', faction: 'iron' },
+        settings: {
+          world: 'jungle',
+          challenge: 'team_deathmatch',
+          durationSeconds: 300
+        },
         players: new Map([[player.id, player]]),
         radius: 28,
         seed: hashCode(code),
         obstacles: [],
-        bullets: [],
+        projectiles: [],
         powerups: [],
-        nextPowerupAt: now() + 5000
+        teamScores: emptyTeamScores(),
+        objective: { controlFaction: null, controlAccumulator: 0 },
+        nextPowerupAt: now() + 5000,
+        startedAt: 0,
+        endsAt: 0,
+        finishedAt: 0,
+        result: null
       };
       rooms.set(code, room);
       attachPlayerSocket(room, player, socket);
@@ -650,7 +920,10 @@ io.on('connection', (socket) => {
     } else {
       removePlayerFromRoom(socket);
       player.name = sanitizeName(payload?.name || player.name);
-      if (room.status === 'lobby') player.vehicle = sanitizeVehicle(payload?.vehicle || player.vehicle);
+      if (room.status === 'lobby') {
+        player.vehicle = sanitizeVehicle(payload?.vehicle || player.vehicle);
+        player.faction = sanitizeFaction(payload?.faction || player.faction);
+      }
     }
 
     attachPlayerSocket(room, player, socket);
@@ -659,7 +932,8 @@ io.on('connection', (socket) => {
       room: publicLobby(room),
       selfId: player.id,
       match: room.status === 'playing' ? matchPayload(room) : null,
-      snapshot: room.status === 'playing' ? snapshot(room) : null
+      snapshot: room.status === 'playing' ? snapshot(room) : null,
+      result: room.status === 'finished' ? room.result : null
     });
     emitLobby(room);
   });
@@ -671,32 +945,35 @@ io.on('connection', (socket) => {
     const player = room?.players.get(clientId);
     if (!room || !player) return callback?.({ ok: false, error: 'Your previous room session is no longer available.' });
 
-    removePlayerFromRoom(socket);
+    if (socket.data.roomCode !== code || socket.data.playerId !== player.id) removePlayerFromRoom(socket);
     attachPlayerSocket(room, player, socket);
     callback?.({
       ok: true,
       room: publicLobby(room),
       selfId: player.id,
       match: room.status === 'playing' ? matchPayload(room) : null,
-      snapshot: room.status === 'playing' ? snapshot(room) : null
+      snapshot: room.status === 'playing' ? snapshot(room) : null,
+      result: room.status === 'finished' ? room.result : null
     });
     emitLobby(room);
   });
 
   socket.on('setLobbySettings', (payload, callback) => {
     const room = rooms.get(socket.data.roomCode);
-    if (!room || room.leaderId !== socket.data.playerId || room.status !== 'lobby') return callback?.({ ok: false });
+    if (!room || room.leaderId !== socket.data.playerId || room.status !== 'lobby') return callback?.({ ok: false, error: 'Only the leader can change match settings.' });
     if (WORLDS[payload?.world]) room.settings.world = payload.world;
-    if (FACTIONS[payload?.faction]) room.settings.faction = payload.faction;
+    room.settings.challenge = sanitizeChallenge(payload?.challenge);
+    room.settings.durationSeconds = sanitizeDuration(payload?.durationSeconds);
     emitLobby(room);
     callback?.({ ok: true });
   });
 
-  socket.on('setVehicle', (payload, callback) => {
+  socket.on('setPlayerLoadout', (payload, callback) => {
     const room = rooms.get(socket.data.roomCode);
     const player = room?.players.get(socket.data.playerId);
-    if (!room || !player || room.status !== 'lobby') return callback?.({ ok: false });
-    player.vehicle = sanitizeVehicle(payload?.vehicle);
+    if (!room || !player || room.status !== 'lobby') return callback?.({ ok: false, error: 'Loadout can only be changed in the lobby.' });
+    if (payload?.vehicle !== undefined) player.vehicle = sanitizeVehicle(payload.vehicle);
+    if (payload?.faction !== undefined) player.faction = sanitizeFaction(payload.faction);
     emitLobby(room);
     callback?.({ ok: true });
   });
@@ -706,26 +983,38 @@ io.on('connection', (socket) => {
     if (!room || room.leaderId !== socket.data.playerId || room.status !== 'lobby') return callback?.({ ok: false, error: 'Only the leader can start.' });
     const connectedPlayers = [...room.players.values()].filter((player) => player.connected);
     if (connectedPlayers.length < 1) return callback?.({ ok: false, error: 'No connected players.' });
+    const connectedFactions = new Set(connectedPlayers.map((player) => player.faction));
+    if (connectedPlayers.length > 1 && connectedFactions.size < 2) {
+      return callback?.({ ok: false, error: 'Choose at least two different factions before starting a team match.' });
+    }
     startMatch(room);
-    callback?.({ ok: true, match: matchPayload(room) });
+    callback?.({ ok: true, match: matchPayload(room), snapshot: snapshot(room) });
   });
 
-  socket.on('input', (payload) => {
+  socket.on('control', (payload) => {
     const room = rooms.get(socket.data.roomCode);
     const player = room?.players.get(socket.data.playerId);
     if (!room || !player || room.status !== 'playing' || player.socketId !== socket.id) return;
-    player.input.forward = Boolean(payload?.forward);
-    player.input.backward = Boolean(payload?.backward);
-    player.input.left = Boolean(payload?.left);
-    player.input.right = Boolean(payload?.right);
-    player.input.fire = Boolean(payload?.fire);
-    player.lastInputAt = now();
+    const sequence = Number.isFinite(payload?.sequence) ? Math.floor(payload.sequence) : player.lastControlSequence + 1;
+    if (sequence <= player.lastControlSequence) return;
+    player.lastControlSequence = sequence;
+    player.control.move = clamp(Math.round(Number(payload?.move) || 0), -1, 1);
+    player.control.turn = clamp(Math.round(Number(payload?.turn) || 0), -1, 1);
+    player.control.fire = Boolean(payload?.fire);
+    player.lastControlAt = now();
   });
 
   socket.on('ability', () => {
     const room = rooms.get(socket.data.roomCode);
     const player = room?.players.get(socket.data.playerId);
     if (room && player && room.status === 'playing' && player.socketId === socket.id) useAbility(room, player);
+  });
+
+  socket.on('returnToLobby', (_payload, callback) => {
+    const room = rooms.get(socket.data.roomCode);
+    if (!room || room.leaderId !== socket.data.playerId || room.status !== 'finished') return callback?.({ ok: false, error: 'Only the leader can return the room to the lobby.' });
+    resetRoomToLobby(room);
+    callback?.({ ok: true, room: publicLobby(room) });
   });
 
   socket.on('leaveRoom', () => removePlayerFromRoom(socket));
@@ -749,5 +1038,5 @@ setInterval(() => {
 }, 1000 / TICK_RATE);
 
 server.listen(PORT, () => {
-  console.log(`Ironfront Complete Game running on http://localhost:${PORT}`);
+  console.log(`Ironfront Complete Game v3 running on http://localhost:${PORT}`);
 });
