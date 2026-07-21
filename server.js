@@ -7,27 +7,30 @@ const http = require('http');
 const { Server } = require('socket.io');
 
 const PORT = Number(process.env.PORT || 3000);
-const TICK_RATE = 30;
-const SNAPSHOT_RATE = 15;
+const TICK_RATE = 60;
+const SNAPSHOT_RATE = 20;
 const MAX_PLAYERS = 8;
 const DISCONNECT_GRACE_MS = 30000;
-const INPUT_TIMEOUT_MS = 320;
+const INPUT_TIMEOUT_MS = 500;
 const CONTROL_ZONE_RADIUS = 6.5;
 
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server, {
-  cors: { origin: true, credentials: false }
+  cors: { origin: true, credentials: false },
+  perMessageDeflate: false,
+  pingInterval: 10000,
+  pingTimeout: 20000
 });
 
 const rooms = new Map();
 
 const VEHICLES = {
-  vanguard: { name: 'Vanguard Tank', hp: 120, speed: 10, damage: 24, reload: 520, radius: 1.45, ability: 'Fortress Shield' },
-  striker: { name: 'Striker Buggy', hp: 88, speed: 15, damage: 16, reload: 260, radius: 1.25, ability: 'Rapid Barrage' },
-  annihilator: { name: 'Annihilator Siege Tank', hp: 190, speed: 7.4, damage: 40, reload: 850, radius: 1.75, ability: 'Ground Shockwave' },
-  spectre: { name: 'Spectre Hovercraft', hp: 105, speed: 13.5, damage: 28, reload: 430, radius: 1.45, ability: 'Phase Drive' },
-  titan: { name: 'Titan Walker', hp: 260, speed: 6.2, damage: 48, reload: 980, radius: 1.8, ability: 'Titan Salvo' }
+  vanguard: { name: 'Vanguard Tank', hp: 120, speed: 10, damage: 24, reload: 520, radius: 1.45, muzzleDistance: 2.67, muzzleHeight: 1.4, ability: 'Fortress Shield' },
+  striker: { name: 'Striker Buggy', hp: 88, speed: 15, damage: 16, reload: 260, radius: 1.25, muzzleDistance: 2.42, muzzleHeight: 1.15, ability: 'Rapid Barrage' },
+  annihilator: { name: 'Annihilator Siege Tank', hp: 190, speed: 7.4, damage: 40, reload: 850, radius: 1.75, muzzleDistance: 3.42, muzzleHeight: 1.4, ability: 'Ground Shockwave' },
+  spectre: { name: 'Spectre Hovercraft', hp: 105, speed: 13.5, damage: 28, reload: 430, radius: 1.45, muzzleDistance: 2.5, muzzleHeight: 1.38, ability: 'Phase Drive' },
+  titan: { name: 'Titan Walker', hp: 260, speed: 6.2, damage: 48, reload: 980, radius: 1.8, muzzleDistance: 2.67, muzzleHeight: 2.78, ability: 'Titan Salvo' }
 };
 
 const FACTIONS = {
@@ -160,9 +163,11 @@ function emptyTeamScores() {
 }
 
 function clearPlayerControl(player) {
-  player.control.move = 0;
-  player.control.turn = 0;
+  player.control.throttle = 0;
+  player.control.steer = 0;
   player.control.fire = false;
+  player.vx = 0;
+  player.vz = 0;
 }
 
 function createPlayer(socket, payload) {
@@ -177,10 +182,12 @@ function createPlayer(socket, payload) {
     disconnectedAt: 0,
     lastControlAt: now(),
     lastControlSequence: -1,
-    control: { move: 0, turn: 0, fire: false },
+    control: { throttle: 0, steer: 0, fire: false },
     x: 0,
     z: 0,
     angle: 0,
+    vx: 0,
+    vz: 0,
     hp: 1,
     maxHp: 1,
     score: 0,
@@ -278,10 +285,26 @@ function projectileHitsObstacle(room, projectile, nextX, nextZ) {
   ));
 }
 
+function pointSegmentDistance(px, pz, ax, az, bx, bz) {
+  const dx = bx - ax;
+  const dz = bz - az;
+  const lengthSquared = dx * dx + dz * dz;
+  if (lengthSquared < 0.000001) return Math.hypot(px - ax, pz - az);
+  const t = clamp(((px - ax) * dx + (pz - az) * dz) / lengthSquared, 0, 1);
+  return Math.hypot(px - (ax + dx * t), pz - (az + dz * t));
+}
+
 function generateObstacles(room) {
   const random = seededRandom(room.seed);
   const count = Math.min(24, 5 + room.players.size * 2);
   const obstacles = [];
+  const factionOrder = Object.keys(FACTIONS);
+  const activeFactions = [...new Set([...room.players.values()].map((player) => player.faction))];
+  const spawnLanes = activeFactions.map((faction) => {
+    const angle = factionOrder.indexOf(faction) / factionOrder.length * Math.PI * 2;
+    const distance = room.radius * 0.58;
+    return { x: Math.cos(angle) * distance, z: Math.sin(angle) * distance };
+  });
   for (let index = 0; index < count; index += 1) {
     let x = 0;
     let z = 0;
@@ -293,7 +316,8 @@ function generateObstacles(room) {
       x = Math.cos(angle) * distance;
       z = Math.sin(angle) * distance;
       const clearCenter = Math.hypot(x, z) > CONTROL_ZONE_RADIUS + radius + 3;
-      safe = clearCenter && obstacles.every((other) => Math.hypot(x - other.x, z - other.z) > radius + other.r + 2.2);
+      const clearSpawnLanes = spawnLanes.every((spawn) => pointSegmentDistance(x, z, spawn.x, spawn.z, 0, 0) > radius + 3.2);
+      safe = clearCenter && clearSpawnLanes && obstacles.every((other) => Math.hypot(x - other.x, z - other.z) > radius + other.r + 2.2);
     }
     if (safe) obstacles.push({ id: makeId(), x, z, r: radius, variant: index % 4 });
   }
@@ -430,18 +454,22 @@ function spawnProjectile(room, player, angleOffset = 0, options = {}) {
   const time = now();
   const world = getWorldStats(room);
   const stats = getPlayerStats(room, player, time);
-  const angle = player.angle + angleOffset;
+  const vehicle = VEHICLES[player.vehicle] || VEHICLES.vanguard;
+  const heading = player.angle + angleOffset;
+  const directionX = Math.sin(heading);
+  const directionZ = -Math.cos(heading);
   const speed = 23 * world.bulletSpeed * (options.speedMultiplier || 1);
   const radius = options.explosive ? 0.42 : 0.23;
-  const muzzleDistance = stats.radius + 1.05;
+  const muzzleDistance = vehicle.muzzleDistance + radius + 0.08;
   room.projectiles.push({
     id: makeId(),
     ownerId: player.id,
     ownerFaction: player.faction,
-    x: player.x + Math.sin(angle) * muzzleDistance,
-    z: player.z - Math.cos(angle) * muzzleDistance,
-    vx: Math.sin(angle) * speed,
-    vz: -Math.cos(angle) * speed,
+    x: player.x + directionX * muzzleDistance,
+    y: vehicle.muzzleHeight,
+    z: player.z + directionZ * muzzleDistance,
+    vx: directionX * speed,
+    vz: directionZ * speed,
     damage: stats.damage * world.damage * (options.damageMultiplier || 1),
     radius,
     explosive: Boolean(options.explosive),
@@ -667,13 +695,20 @@ function updateRoom(room, dt) {
     }
 
     const stats = getPlayerStats(room, player, time);
-    player.angle += player.control.turn * dt * 2.45 * world.traction;
-    if (player.control.move !== 0) {
+    player.angle += player.control.steer * dt * 2.45 * world.traction;
+    player.angle = Math.atan2(Math.sin(player.angle), Math.cos(player.angle));
+    player.vx = 0;
+    player.vz = 0;
+    if (player.control.throttle !== 0) {
       const phase = player.vehicle === 'spectre' && player.abilityUntil > time;
       const speed = stats.speed * world.traction * (phase ? 1.65 : 1);
-      const dx = Math.sin(player.angle) * player.control.move * speed * dt;
-      const dz = -Math.cos(player.angle) * player.control.move * speed * dt;
-      moveWithCollision(room, player, dx, dz);
+      player.vx = Math.sin(player.angle) * player.control.throttle * speed;
+      player.vz = -Math.cos(player.angle) * player.control.throttle * speed;
+      const beforeX = player.x;
+      const beforeZ = player.z;
+      moveWithCollision(room, player, player.vx * dt, player.vz * dt);
+      player.vx = (player.x - beforeX) / Math.max(dt, 0.0001);
+      player.vz = (player.z - beforeZ) / Math.max(dt, 0.0001);
     }
 
     if (player.control.fire) fireVehicleWeapon(room, player, time);
@@ -709,6 +744,8 @@ function snapshot(room) {
       x: player.x,
       z: player.z,
       angle: player.angle,
+      vx: player.vx,
+      vz: player.vz,
       hp: Math.max(0, player.hp),
       maxHp: player.maxHp,
       score: player.score,
@@ -996,11 +1033,12 @@ io.on('connection', (socket) => {
     const player = room?.players.get(socket.data.playerId);
     if (!room || !player || room.status !== 'playing' || player.socketId !== socket.id) return;
     const sequence = Number.isFinite(payload?.sequence) ? Math.floor(payload.sequence) : player.lastControlSequence + 1;
-    if (sequence <= player.lastControlSequence) return;
-    player.lastControlSequence = sequence;
-    player.control.move = clamp(Math.round(Number(payload?.move) || 0), -1, 1);
-    player.control.turn = clamp(Math.round(Number(payload?.turn) || 0), -1, 1);
+    if (sequence < player.lastControlSequence) return;
+    if (sequence > player.lastControlSequence) player.lastControlSequence = sequence;
+    player.control.throttle = clamp(Math.round(Number(payload?.throttle) || 0), -1, 1);
+    player.control.steer = clamp(Math.round(Number(payload?.steer) || 0), -1, 1);
     player.control.fire = Boolean(payload?.fire);
+    // Heartbeat packets may intentionally repeat a sequence while a key is held.
     player.lastControlAt = now();
   });
 
@@ -1017,26 +1055,30 @@ io.on('connection', (socket) => {
     callback?.({ ok: true, room: publicLobby(room) });
   });
 
+  socket.on('latencyPing', (callback) => callback?.({ serverTime: now() }));
+
   socket.on('leaveRoom', () => removePlayerFromRoom(socket));
   socket.on('disconnect', () => detachPlayerSocket(socket));
 });
 
 let snapshotAccumulator = 0;
+let previousTickAt = now();
 setInterval(() => {
-  const dt = 1 / TICK_RATE;
+  const tickAt = now();
+  const dt = clamp((tickAt - previousTickAt) / 1000, 0, 0.05);
+  previousTickAt = tickAt;
   snapshotAccumulator += dt;
-  const time = now();
   for (const room of [...rooms.values()]) {
-    if (cleanupDisconnectedPlayers(room, time)) updateRoom(room, dt);
+    if (cleanupDisconnectedPlayers(room, tickAt)) updateRoom(room, dt);
   }
   if (snapshotAccumulator >= 1 / SNAPSHOT_RATE) {
-    snapshotAccumulator = 0;
+    snapshotAccumulator %= 1 / SNAPSHOT_RATE;
     for (const room of rooms.values()) {
-      if (room.status === 'playing') io.to(room.code).emit('snapshot', snapshot(room));
+      if (room.status === 'playing') io.to(room.code).volatile.emit('snapshot', snapshot(room));
     }
   }
 }, 1000 / TICK_RATE);
 
 server.listen(PORT, () => {
-  console.log(`Ironfront Complete Game v3 running on http://localhost:${PORT}`);
+  console.log(`Ironfront Complete Game v4 running on http://localhost:${PORT}`);
 });

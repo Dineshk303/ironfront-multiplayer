@@ -298,7 +298,7 @@ function renderWorldMap() {
 async function loadEngine() {
   if (engine) return engine;
   if (!enginePromise) {
-    enginePromise = import('/engine.js?v=3.0.0').then((module) => {
+    enginePromise = import('/engine.js?v=4.0.0').then((module) => {
       engine = module;
       return module.initialize({
         canvasHost: document.getElementById('gameCanvas'),
@@ -518,8 +518,11 @@ function setupSocket() {
   socket = window.io({
     autoConnect: false,
     transports: ['websocket', 'polling'],
+    rememberUpgrade: true,
     reconnection: true,
-    reconnectionAttempts: 8,
+    reconnectionAttempts: 12,
+    reconnectionDelay: 300,
+    reconnectionDelayMax: 1500,
     timeout: 10000
   });
 
@@ -811,7 +814,9 @@ function updateMultiplayerHud(hud) {
   document.getElementById('deathsLabel').textContent = hud.deaths;
   document.getElementById('scoreLabel').textContent = hud.score;
   document.getElementById('matchTimerLabel').textContent = formatMatchTime(hud.remainingMs);
-  document.getElementById('challengeHudLabel').textContent = CHALLENGES[hud.challenge]?.name || 'Team Battle';
+  const challengeName = CHALLENGES[hud.challenge]?.name || 'Team Battle';
+  const latency = Number.isFinite(hud.latencyMs) && hud.latencyMs > 0 ? ` · ${hud.latencyMs} ms` : '';
+  document.getElementById('challengeHudLabel').textContent = `${challengeName}${latency}`;
   document.getElementById('respawnOverlay').classList.toggle('hidden', !hud.dead);
   document.getElementById('abilityButton').textContent = hud.abilityCooldown > 0 ? `${hud.ability} ${hud.abilityCooldown.toFixed(1)}s` : `${hud.ability} [Q]`;
   document.getElementById('abilityButton').disabled = hud.dead || hud.abilityCooldown > 0;
@@ -1024,8 +1029,20 @@ document.getElementById('leaveMatchButton').addEventListener('click', leaveCurre
 
 document.querySelectorAll('[data-touch]').forEach((button) => {
   const control = button.dataset.touch;
-  const start = (event) => { event.preventDefault(); engine?.setInput(control, true); button.setPointerCapture?.(event.pointerId); };
-  const end = (event) => { event.preventDefault(); engine?.setInput(control, false); };
+  const activeSources = new Map();
+  const start = (event) => {
+    event.preventDefault();
+    const source = `touch:${control}:${event.pointerId}`;
+    activeSources.set(event.pointerId, source);
+    engine?.setInput(control, true, source);
+    button.setPointerCapture?.(event.pointerId);
+  };
+  const end = (event) => {
+    event.preventDefault();
+    const source = activeSources.get(event.pointerId);
+    if (source) engine?.releaseInputSource?.(source);
+    activeSources.delete(event.pointerId);
+  };
   button.addEventListener('pointerdown', start);
   button.addEventListener('pointerup', end);
   button.addEventListener('pointercancel', end);
@@ -1033,8 +1050,20 @@ document.querySelectorAll('[data-touch]').forEach((button) => {
 });
 
 const mobileFire = document.getElementById('mobileFireButton');
-mobileFire.addEventListener('pointerdown', (event) => { event.preventDefault(); engine?.setInput('fire', true); mobileFire.setPointerCapture?.(event.pointerId); });
-['pointerup', 'pointercancel', 'lostpointercapture'].forEach((eventName) => mobileFire.addEventListener(eventName, (event) => { event.preventDefault(); engine?.setInput('fire', false); }));
+const mobileFireSources = new Map();
+mobileFire.addEventListener('pointerdown', (event) => {
+  event.preventDefault();
+  const source = `touch:fire:${event.pointerId}`;
+  mobileFireSources.set(event.pointerId, source);
+  engine?.setInput('fire', true, source);
+  mobileFire.setPointerCapture?.(event.pointerId);
+});
+['pointerup', 'pointercancel', 'lostpointercapture'].forEach((eventName) => mobileFire.addEventListener(eventName, (event) => {
+  event.preventDefault();
+  const source = mobileFireSources.get(event.pointerId);
+  if (source) engine?.releaseInputSource?.(source);
+  mobileFireSources.delete(event.pointerId);
+}));
 
 document.getElementById('reloadButton').addEventListener('click', () => location.reload());
 

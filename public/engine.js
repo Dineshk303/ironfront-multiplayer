@@ -1,5 +1,5 @@
 import * as THREE from '/vendor/three.module.js';
-import { controls } from './controls.js?v=3.0.0';
+import { controls } from './controls.js?v=4.0.0';
 
 const VEHICLES = {
   vanguard: { name: 'Vanguard Tank', type: 'tank', hp: 120, speed: 10, damage: 24, reload: 0.52, radius: 1.45, ability: 'Fortress Shield', color: '#4b92ff' },
@@ -31,6 +31,13 @@ const FACTION_COLORS = {
   neon: '#55d8b4',
   solar: '#e3a53c',
   void: '#b879ff'
+};
+
+const FACTION_SPEED = {
+  iron: 1,
+  neon: 1.18,
+  solar: 1,
+  void: 1
 };
 
 let initialized = false;
@@ -85,6 +92,49 @@ function shadow(mesh) {
 
 function clearGroup(group) {
   while (group.children.length) group.remove(group.children[0]);
+}
+
+const HEADING_TAU = Math.PI * 2;
+
+function normalizeHeading(value) {
+  let heading = value % HEADING_TAU;
+  if (heading > Math.PI) heading -= HEADING_TAU;
+  if (heading < -Math.PI) heading += HEADING_TAU;
+  return heading;
+}
+
+function headingDifference(target, current) {
+  return Math.atan2(Math.sin(target - current), Math.cos(target - current));
+}
+
+function headingForward(heading, target = new THREE.Vector3()) {
+  return target.set(Math.sin(heading), 0, -Math.cos(heading));
+}
+
+function setVehicleHeading(mesh, heading) {
+  const normalized = normalizeHeading(heading);
+  mesh.userData.heading = normalized;
+  // Three.js positive Y rotation turns the model to its visual left. Gameplay
+  // heading is positive clockwise/right, so the render rotation is negated.
+  mesh.rotation.y = -normalized;
+}
+
+function getVehicleHeading(mesh) {
+  return Number.isFinite(mesh?.userData?.heading) ? mesh.userData.heading : normalizeHeading(-mesh.rotation.y);
+}
+
+function getVehicleMuzzle(mesh, headingOffset = 0) {
+  const heading = normalizeHeading(getVehicleHeading(mesh) + headingOffset);
+  const direction = headingForward(heading);
+  const muzzle = mesh.userData.muzzle;
+  const position = new THREE.Vector3();
+  if (muzzle) muzzle.getWorldPosition(position);
+  else {
+    position.copy(mesh.position);
+    position.y += 1.3;
+    position.addScaledVector(direction, (mesh.userData.radius || 1.4) + 1);
+  }
+  return { position, direction, heading };
 }
 
 function buildVehicle(type, color) {
@@ -163,8 +213,19 @@ function buildVehicle(type, color) {
     group.add(gun);
   }
 
+  const muzzle = new THREE.Object3D();
+  if (type === 'buggy') muzzle.position.set(0, 1.15, -2.3);
+  else if (type === 'hover') muzzle.position.set(0, 1.38, -2.38);
+  else if (type === 'walker') muzzle.position.set(0, 2.78, -2.55);
+  else if (type === 'siege') muzzle.position.set(0, 1.4, -3.3);
+  else muzzle.position.set(0, 1.4, -2.55);
+  muzzle.name = 'muzzle';
+  group.add(muzzle);
+
   group.userData.radius = type === 'walker' ? 1.8 : type === 'siege' ? 1.75 : type === 'buggy' ? 1.25 : 1.45;
   group.userData.type = type;
+  group.userData.muzzle = muzzle;
+  setVehicleHeading(group, 0);
   return group;
 }
 
@@ -219,7 +280,10 @@ function generateObstacles(seed, radius, count) {
       const r = 1.3 + random() * 1.7;
       const x = Math.cos(angle) * distance;
       const z = Math.sin(angle) * distance;
-      if (obstacles.every((other) => Math.hypot(x - other.x, z - other.z) > r + other.r + 2.1)) {
+      const playerSpawnZ = radius * 0.64;
+      const laneDistance = Math.abs(x);
+      const insidePlayerLane = z >= -2 && z <= playerSpawnZ + 3 && laneDistance < r + 3.2;
+      if (!insidePlayerLane && obstacles.every((other) => Math.hypot(x - other.x, z - other.z) > r + other.r + 2.1)) {
         candidate = { id: `ob-${index}`, x, z, r, variant: index % 4 };
         break;
       }
@@ -422,12 +486,12 @@ function replaceSinglePlayerVehicle(vehicleKey, fullHeal = false) {
   if (!single) return;
   const oldMesh = single.player.mesh;
   const position = oldMesh ? oldMesh.position.clone() : new THREE.Vector3(0, 0, engineState.radius * 0.65);
-  const rotation = oldMesh ? oldMesh.rotation.y : 0;
+  const heading = oldMesh ? getVehicleHeading(oldMesh) : 0;
   if (oldMesh) actorsRoot.remove(oldMesh);
   const vehicle = VEHICLES[vehicleKey];
   const mesh = buildVehicle(vehicle.type, vehicle.color);
   mesh.position.copy(position);
-  mesh.rotation.y = rotation;
+  setVehicleHeading(mesh, heading);
   actorsRoot.add(mesh);
   single.currentVehicle = vehicleKey;
   single.player.mesh = mesh;
@@ -448,7 +512,7 @@ function spawnSingleEnemy(index, total, boss = false) {
   const angle = total > 0 ? index / total * Math.PI * 2 : 0;
   const distance = engineState.radius * 0.68 + (index % 3) * 1.4;
   mesh.position.set(Math.sin(angle) * distance, engineState.world === 'space' ? 0.55 : 0, Math.cos(angle) * distance);
-  mesh.rotation.y = angle + Math.PI;
+  setVehicleHeading(mesh, Math.atan2(-mesh.position.x, mesh.position.z));
   if (boss) {
     mesh.scale.multiplyScalar(1.45);
     mesh.userData.radius *= 1.45;
@@ -563,20 +627,17 @@ function createSingleProjectile({ owner, hostile, angleOffset = 0, explosive = f
   const single = engineState.single;
   if (!single) return;
   const sourceMesh = hostile ? owner.mesh : single.player.mesh;
-  const angle = sourceMesh.rotation.y + angleOffset;
-  const directionX = Math.sin(angle);
-  const directionZ = -Math.cos(angle);
+  sourceMesh.updateWorldMatrix(true, false);
+  const muzzle = getVehicleMuzzle(sourceMesh, angleOffset);
   const color = hostile ? '#ff6972' : explosive ? '#f3c94c' : VEHICLES[single.currentVehicle].color;
   const radius = explosive ? 0.32 : 0.2;
-  const sourceRadius = hostile ? owner.radius : playerStats(single).radius;
   const mesh = new THREE.Mesh(
     new THREE.SphereGeometry(radius, 9, 9),
     new THREE.MeshStandardMaterial({ color, emissive: color, emissiveIntensity: 2.3 })
   );
-  mesh.position.copy(sourceMesh.position);
-  mesh.position.y += sourceMesh.userData.type === 'walker' ? 2.7 : 1.3;
-  mesh.position.x += directionX * (sourceRadius + 1.05);
-  mesh.position.z += directionZ * (sourceRadius + 1.05);
+  mesh.position.copy(muzzle.position);
+  // Offset slightly beyond the visual barrel to avoid colliding with the owner.
+  mesh.position.addScaledVector(muzzle.direction, radius + 0.12);
   actorsRoot.add(mesh);
 
   const speed = (hostile ? 16 : 23) * WORLDS[engineState.world].bullet * speedMultiplier;
@@ -589,8 +650,8 @@ function createSingleProjectile({ owner, hostile, angleOffset = 0, explosive = f
     mesh,
     hostile,
     ownerId: hostile ? owner.id : 'player',
-    vx: directionX * speed,
-    vz: directionZ * speed,
+    vx: muzzle.direction.x * speed,
+    vz: muzzle.direction.z * speed,
     damage,
     radius,
     explosive,
@@ -729,13 +790,14 @@ function updateSinglePlayer(deltaTime) {
   const stats = playerStats(single);
   const control = controls.snapshot();
 
-  single.player.mesh.rotation.y += control.turn * deltaTime * 2.45 * world.traction;
-  if (control.move !== 0) {
-    const direction = new THREE.Vector3(Math.sin(single.player.mesh.rotation.y), 0, -Math.cos(single.player.mesh.rotation.y));
+  const heading = normalizeHeading(getVehicleHeading(single.player.mesh) + control.steer * deltaTime * 2.45 * world.traction);
+  setVehicleHeading(single.player.mesh, heading);
+  if (control.throttle !== 0) {
+    const direction = headingForward(heading);
     const phase = single.currentVehicle === 'spectre' && single.abilityUntil > time;
     const speedPower = (single.power === 'speed' || single.power === 'godmode') && single.powerUntil > time;
     const speed = stats.speed * world.traction * terrainMultiplier(single.player.mesh.position.x, single.player.mesh.position.z) * (phase ? 1.65 : 1) * (speedPower ? 1.55 : 1);
-    moveWithCollision(single.player.mesh, direction.x * control.move * speed * deltaTime, direction.z * control.move * speed * deltaTime, stats.radius);
+    moveWithCollision(single.player.mesh, direction.x * control.throttle * speed * deltaTime, direction.z * control.throttle * speed * deltaTime, stats.radius);
   }
   if (control.fire) tryFireSinglePlayer();
 
@@ -760,26 +822,31 @@ function updateSingleEnemies(deltaTime) {
   const single = engineState.single;
   const playerPosition = single.player.mesh.position;
   single.enemies.forEach((enemy) => {
-    const direction = playerPosition.clone().sub(enemy.mesh.position);
-    const distance = direction.length();
-    direction.y = 0;
-    direction.normalize();
-    const targetAngle = Math.atan2(direction.x, -direction.z);
-    const difference = Math.atan2(Math.sin(targetAngle - enemy.mesh.rotation.y), Math.cos(targetAngle - enemy.mesh.rotation.y));
-    enemy.mesh.rotation.y += THREE.MathUtils.clamp(difference, -deltaTime * 2.1, deltaTime * 2.1);
+    const deltaX = playerPosition.x - enemy.mesh.position.x;
+    const deltaZ = playerPosition.z - enemy.mesh.position.z;
+    const distance = Math.hypot(deltaX, deltaZ);
+    const targetHeading = Math.atan2(deltaX, -deltaZ);
+    const currentHeading = getVehicleHeading(enemy.mesh);
+    const turnStep = THREE.MathUtils.clamp(headingDifference(targetHeading, currentHeading), -deltaTime * 2.1, deltaTime * 2.1);
+    const heading = normalizeHeading(currentHeading + turnStep);
+    setVehicleHeading(enemy.mesh, heading);
+
     enemy.strafeTimer -= deltaTime;
     if (enemy.strafeTimer <= 0) {
       enemy.strafeTimer = 0.7 + Math.random() * 1.5;
       if (Math.random() < 0.45) enemy.strafe *= -1;
     }
-    const forward = new THREE.Vector3(Math.sin(enemy.mesh.rotation.y), 0, -Math.cos(enemy.mesh.rotation.y));
-    const side = new THREE.Vector3(forward.z, 0, -forward.x);
+
+    const forward = headingForward(heading);
+    const side = new THREE.Vector3(-forward.z, 0, forward.x);
     const advance = distance > (enemy.boss ? 13 : 10) ? 1 : distance < 5 ? -0.55 : 0;
-    const movement = forward.multiplyScalar(advance).add(side.multiplyScalar(enemy.strafe * 0.34));
+    const movement = forward.multiplyScalar(advance).add(side.multiplyScalar(enemy.strafe * 0.22));
     moveWithCollision(enemy.mesh, movement.x * enemy.speed * deltaTime, movement.z * enemy.speed * deltaTime, enemy.radius);
     if (engineState.world === 'space' || VEHICLES[enemy.vehicle].type === 'hover') enemy.mesh.position.y = 0.55 + Math.sin(performance.now() * 0.002 + enemy.mesh.position.x) * 0.14;
+
     enemy.reloadRemaining -= deltaTime;
-    if (enemy.reloadRemaining <= 0 && distance < 34) {
+    const aimError = Math.abs(headingDifference(targetHeading, heading));
+    if (enemy.reloadRemaining <= 0 && distance < 34 && aimError < 0.16) {
       createSingleProjectile({ owner: enemy, hostile: true, explosive: enemy.boss });
       if (enemy.boss && Math.random() < 0.55) {
         createSingleProjectile({ owner: enemy, hostile: true, angleOffset: -0.16, explosive: true });
@@ -1027,7 +1094,12 @@ function startMultiplayerInternal(config) {
     renderedPowerups: new Map(),
     callbacks: config,
     lastControlSentAt: 0,
-    lastControlSequenceSent: -1
+    lastControlSequenceSent: -1,
+    clockOffsetMs: 0,
+    lastSnapshotServerTime: 0,
+    localPrediction: null,
+    latencyMs: 0,
+    lastLatencyProbeAt: 0
   };
 }
 
@@ -1052,6 +1124,13 @@ function ensureMultiplayerPlayerMesh(player) {
 function syncMultiplayer(snapshot, deltaTime) {
   const multiplayer = engineState.multiplayer;
   if (!multiplayer) return;
+
+  const localNow = Date.now();
+  const measuredOffset = snapshot.serverTime - localNow;
+  multiplayer.clockOffsetMs = THREE.MathUtils.lerp(multiplayer.clockOffsetMs, measuredOffset, 0.08);
+  const estimatedServerNow = localNow + multiplayer.clockOffsetMs;
+  const snapshotAge = THREE.MathUtils.clamp((estimatedServerNow - snapshot.serverTime) / 1000, 0, 0.12);
+
   const aliveIds = new Set(snapshot.players.map((player) => player.id));
   for (const [id, entry] of multiplayer.renderedPlayers) {
     if (!aliveIds.has(id)) {
@@ -1071,10 +1150,55 @@ function syncMultiplayer(snapshot, deltaTime) {
         child.material.opacity = player.connected === false ? 0.45 : 1;
       }
     });
-    entry.group.position.x = THREE.MathUtils.lerp(entry.group.position.x, player.x, 1 - Math.pow(0.0001, deltaTime));
-    entry.group.position.z = THREE.MathUtils.lerp(entry.group.position.z, player.z, 1 - Math.pow(0.0001, deltaTime));
-    const difference = Math.atan2(Math.sin(player.angle - entry.group.rotation.y), Math.cos(player.angle - entry.group.rotation.y));
-    entry.group.rotation.y += difference * Math.min(1, deltaTime * 12);
+
+    if (player.id === multiplayer.selfId && !player.dead) {
+      if (!multiplayer.localPrediction || multiplayer.localPrediction.vehicle !== player.vehicle) {
+        multiplayer.localPrediction = { x: player.x, z: player.z, heading: player.angle, vehicle: player.vehicle, serverTime: snapshot.serverTime };
+      }
+      const predicted = multiplayer.localPrediction;
+      if (predicted.serverTime !== snapshot.serverTime) {
+        predicted.serverTime = snapshot.serverTime;
+        const errorDistance = Math.hypot(player.x - predicted.x, player.z - predicted.z);
+        if (errorDistance > 5) {
+          predicted.x = player.x;
+          predicted.z = player.z;
+          predicted.heading = player.angle;
+        } else {
+          const correction = 0.28;
+          predicted.x = THREE.MathUtils.lerp(predicted.x, player.x, correction);
+          predicted.z = THREE.MathUtils.lerp(predicted.z, player.z, correction);
+          predicted.heading = normalizeHeading(predicted.heading + headingDifference(player.angle, predicted.heading) * correction);
+        }
+      }
+
+      const control = controls.snapshot();
+      const world = WORLDS[snapshot.settings.world] || WORLDS.jungle;
+      const vehicle = VEHICLES[player.vehicle] || VEHICLES.vanguard;
+      const phase = player.vehicle === 'spectre' && player.abilityUntil > snapshot.serverTime;
+      const speedPower = (player.power === 'speed' || player.power === 'godmode') && player.powerUntil > snapshot.serverTime;
+      const predictedSpeed = vehicle.speed * (FACTION_SPEED[player.faction] || 1) * world.traction * (phase ? 1.65 : 1) * (speedPower ? 1.55 : 1);
+      predicted.heading = normalizeHeading(predicted.heading + control.steer * deltaTime * 2.45 * world.traction);
+      if (control.throttle !== 0) {
+        const direction = headingForward(predicted.heading);
+        const proxy = entry.group;
+        proxy.position.set(predicted.x, proxy.position.y, predicted.z);
+        moveWithCollision(proxy, direction.x * control.throttle * predictedSpeed * deltaTime, direction.z * control.throttle * predictedSpeed * deltaTime, vehicle.radius);
+        predicted.x = proxy.position.x;
+        predicted.z = proxy.position.z;
+      }
+      entry.group.position.x = predicted.x;
+      entry.group.position.z = predicted.z;
+      setVehicleHeading(entry.group, predicted.heading);
+    } else {
+      const targetX = player.x + (player.vx || 0) * snapshotAge;
+      const targetZ = player.z + (player.vz || 0) * snapshotAge;
+      const follow = 1 - Math.pow(0.00008, deltaTime);
+      entry.group.position.x = THREE.MathUtils.lerp(entry.group.position.x, targetX, follow);
+      entry.group.position.z = THREE.MathUtils.lerp(entry.group.position.z, targetZ, follow);
+      const currentHeading = getVehicleHeading(entry.group);
+      setVehicleHeading(entry.group, currentHeading + headingDifference(player.angle, currentHeading) * Math.min(1, deltaTime * 14));
+    }
+
     const hover = player.vehicle === 'spectre' || snapshot.settings.world === 'space';
     entry.group.position.y = hover ? 0.55 + Math.sin(performance.now() * 0.003 + player.x) * 0.12 : 0;
     entry.label.position.set(entry.group.position.x, entry.group.position.y + (player.vehicle === 'titan' ? 4.3 : 2.8), entry.group.position.z);
@@ -1092,12 +1216,15 @@ function syncMultiplayer(snapshot, deltaTime) {
     if (!mesh) {
       const color = FACTION_COLORS[bullet.ownerFaction] || (bullet.ownerId === multiplayer.selfId ? '#7db7ff' : '#ff6c73');
       mesh = new THREE.Mesh(new THREE.SphereGeometry(bullet.radius, 9, 9), new THREE.MeshStandardMaterial({ color, emissive: color, emissiveIntensity: 2.2 }));
+      mesh.position.set(bullet.x, bullet.y || 1.25, bullet.z);
       actorsRoot.add(mesh);
       multiplayer.renderedBullets.set(bullet.id, mesh);
     }
-    mesh.position.x = THREE.MathUtils.lerp(mesh.position.x, bullet.x, 0.72);
-    mesh.position.z = THREE.MathUtils.lerp(mesh.position.z, bullet.z, 0.72);
-    mesh.position.y = snapshot.settings.world === 'space' ? 1.7 : 1.25;
+    const targetX = bullet.x + bullet.vx * snapshotAge;
+    const targetZ = bullet.z + bullet.vz * snapshotAge;
+    mesh.position.x = THREE.MathUtils.lerp(mesh.position.x, targetX, 0.82);
+    mesh.position.z = THREE.MathUtils.lerp(mesh.position.z, targetZ, 0.82);
+    mesh.position.y = bullet.y || (snapshot.settings.world === 'space' ? 1.7 : 1.25);
   });
 
   const pickupIds = new Set(snapshot.powerups.map((powerup) => powerup.id));
@@ -1137,7 +1264,8 @@ function syncMultiplayer(snapshot, deltaTime) {
       teamScores: snapshot.teamScores || {},
       remainingMs: snapshot.remainingMs || 0,
       challenge: snapshot.settings.challenge,
-      objective: snapshot.objective || null
+      objective: snapshot.objective || null,
+      latencyMs: multiplayer.latencyMs
     });
   }
 }
@@ -1167,10 +1295,21 @@ function sendMultiplayerControl(force = false) {
   const time = performance.now();
   const packet = controls.networkPacket();
   const sequenceChanged = packet.sequence !== multiplayer.lastControlSequenceSent;
-  if (!force && !sequenceChanged && time - multiplayer.lastControlSentAt < 100) return;
+  if (!force && !sequenceChanged && time - multiplayer.lastControlSentAt < 33) return;
   multiplayer.lastControlSentAt = time;
   multiplayer.lastControlSequenceSent = packet.sequence;
-  multiplayer.socket.emit('control', packet);
+  multiplayer.socket.volatile.emit('control', packet);
+
+  if (time - multiplayer.lastLatencyProbeAt > 2000) {
+    multiplayer.lastLatencyProbeAt = time;
+    const started = performance.now();
+    multiplayer.socket.timeout(1500).emit('latencyPing', (error) => {
+      if (!error && engineState.multiplayer === multiplayer) {
+        const rtt = performance.now() - started;
+        multiplayer.latencyMs = Math.round(THREE.MathUtils.lerp(multiplayer.latencyMs || rtt, rtt, 0.35));
+      }
+    });
+  }
 }
 
 function resize() {
@@ -1257,11 +1396,17 @@ export function startMultiplayer(config) {
 
 export function applyMultiplayerSnapshot(snapshot) {
   if (engineState.mode !== 'multi' || !engineState.multiplayer) return;
+  if (!snapshot || snapshot.serverTime <= engineState.multiplayer.lastSnapshotServerTime) return;
+  engineState.multiplayer.lastSnapshotServerTime = snapshot.serverTime;
   engineState.multiplayer.snapshot = snapshot;
 }
 
-export function setInput(control, active) {
-  controls.set(control, Boolean(active), `external:${control}`);
+export function setInput(control, active, source = `external:${control}`) {
+  controls.set(control, Boolean(active), source);
+}
+
+export function releaseInputSource(source) {
+  controls.releaseSource(source);
 }
 
 export function releaseAllInputs() {

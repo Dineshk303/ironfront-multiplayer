@@ -1,40 +1,41 @@
 'use strict';
 
-const ACTIONS = Object.freeze(['forward', 'backward', 'left', 'right', 'fire']);
-const KEY_BINDINGS = Object.freeze({
-  KeyW: 'forward',
-  ArrowUp: 'forward',
-  KeyS: 'backward',
-  ArrowDown: 'backward',
-  KeyA: 'left',
-  ArrowLeft: 'left',
-  KeyD: 'right',
-  ArrowRight: 'right',
-  Space: 'fire'
+const ACTION_CODES = Object.freeze({
+  forward: new Set(['KeyW', 'ArrowUp']),
+  backward: new Set(['KeyS', 'ArrowDown']),
+  left: new Set(['KeyA', 'ArrowLeft']),
+  right: new Set(['KeyD', 'ArrowRight']),
+  fire: new Set(['Space'])
 });
 
-function shouldIgnoreTarget(target) {
+const ALL_CODES = new Set(Object.values(ACTION_CODES).flatMap((codes) => [...codes]));
+
+function isEditableTarget(target) {
   return target instanceof HTMLElement && (
     target.matches('input, textarea, select, button, a') ||
     target.isContentEditable
   );
 }
 
+function axis(positive, negative) {
+  return (positive ? 1 : 0) - (negative ? 1 : 0);
+}
+
 class ControlSystem {
   constructor() {
-    this.sources = new Map(ACTIONS.map((action) => [action, new Set()]));
-    this.keyboardSources = new Map();
+    this.keyboard = new Set();
+    this.external = new Map();
     this.sequence = 0;
     this.attached = false;
-    this.isEnabled = () => false;
+    this.enabled = () => false;
     this.onAbility = () => {};
     this.onCamera = () => {};
     this.onChange = () => {};
-    this.lastPacket = this.packet();
+    this.previousStateKey = '';
   }
 
   attach({ isEnabled, onAbility, onCamera, onChange } = {}) {
-    if (typeof isEnabled === 'function') this.isEnabled = isEnabled;
+    if (typeof isEnabled === 'function') this.enabled = isEnabled;
     if (typeof onAbility === 'function') this.onAbility = onAbility;
     if (typeof onCamera === 'function') this.onCamera = onCamera;
     if (typeof onChange === 'function') this.onChange = onChange;
@@ -51,17 +52,17 @@ class ControlSystem {
   }
 
   handleKeyDown(event) {
-    if (!this.isEnabled() || shouldIgnoreTarget(event.target)) return;
-    const action = KEY_BINDINGS[event.code];
-    if (action) {
+    if (!this.enabled() || isEditableTarget(event.target)) return;
+
+    if (ALL_CODES.has(event.code)) {
       event.preventDefault();
-      if (!this.keyboardSources.has(event.code)) {
-        const source = `keyboard:${event.code}`;
-        this.keyboardSources.set(event.code, source);
-        this.set(action, true, source);
+      if (!this.keyboard.has(event.code)) {
+        this.keyboard.add(event.code);
+        this.emitIfChanged();
       }
       return;
     }
+
     if (!event.repeat && event.code === 'KeyQ') {
       event.preventDefault();
       this.onAbility();
@@ -72,57 +73,33 @@ class ControlSystem {
   }
 
   handleKeyUp(event) {
-    const action = KEY_BINDINGS[event.code];
-    if (!action) return;
+    if (!ALL_CODES.has(event.code)) return;
     event.preventDefault();
-    const source = this.keyboardSources.get(event.code) || `keyboard:${event.code}`;
-    this.keyboardSources.delete(event.code);
-    this.set(action, false, source);
+    if (this.keyboard.delete(event.code)) this.emitIfChanged();
   }
 
-  set(action, active, source = `external:${action}`) {
-    if (!this.sources.has(action)) return;
-    const activeSources = this.sources.get(action);
-    const before = activeSources.size > 0;
-    if (active) activeSources.add(source);
-    else activeSources.delete(source);
-    const after = activeSources.size > 0;
-    if (before !== after) this.emitChange();
-  }
-
-  releaseSource(source) {
-    let changed = false;
-    for (const activeSources of this.sources.values()) {
-      const before = activeSources.size;
-      activeSources.delete(source);
-      changed = changed || before !== activeSources.size;
-    }
-    if (changed) this.emitChange();
-  }
-
-  reset() {
-    let changed = false;
-    for (const activeSources of this.sources.values()) {
-      changed = changed || activeSources.size > 0;
-      activeSources.clear();
-    }
-    this.keyboardSources.clear();
-    if (changed) this.emitChange();
+  actionActive(action) {
+    const codes = ACTION_CODES[action];
+    if (codes && [...codes].some((code) => this.keyboard.has(code))) return true;
+    const externalSources = this.external.get(action);
+    return Boolean(externalSources && externalSources.size > 0);
   }
 
   snapshot() {
-    const forward = this.sources.get('forward').size > 0;
-    const backward = this.sources.get('backward').size > 0;
-    const left = this.sources.get('left').size > 0;
-    const right = this.sources.get('right').size > 0;
+    const forward = this.actionActive('forward');
+    const backward = this.actionActive('backward');
+    const left = this.actionActive('left');
+    const right = this.actionActive('right');
+    const fire = this.actionActive('fire');
+
     return Object.freeze({
       forward,
       backward,
       left,
       right,
-      fire: this.sources.get('fire').size > 0,
-      move: (forward ? 1 : 0) - (backward ? 1 : 0),
-      turn: (right ? 1 : 0) - (left ? 1 : 0)
+      fire,
+      throttle: axis(forward, backward),
+      steer: axis(right, left)
     });
   }
 
@@ -130,20 +107,54 @@ class ControlSystem {
     const state = this.snapshot();
     return {
       sequence: this.sequence,
-      move: state.move,
-      turn: state.turn,
-      fire: state.fire
+      throttle: state.throttle,
+      steer: state.steer,
+      fire: state.fire,
+      clientTime: performance.now()
     };
   }
 
-  emitChange() {
+  set(action, active, source = `external:${action}`) {
+    if (!Object.hasOwn(ACTION_CODES, action)) return;
+    let sources = this.external.get(action);
+    if (!sources) {
+      sources = new Set();
+      this.external.set(action, sources);
+    }
+    const changed = active ? !sources.has(source) : sources.has(source);
+    if (active) sources.add(source);
+    else sources.delete(source);
+    if (sources.size === 0) this.external.delete(action);
+    if (changed) this.emitIfChanged();
+  }
+
+  releaseSource(source) {
+    let changed = false;
+    for (const [action, sources] of this.external) {
+      if (sources.delete(source)) changed = true;
+      if (sources.size === 0) this.external.delete(action);
+    }
+    if (changed) this.emitIfChanged();
+  }
+
+  reset() {
+    const hadInput = this.keyboard.size > 0 || this.external.size > 0;
+    this.keyboard.clear();
+    this.external.clear();
+    if (hadInput) this.emitIfChanged(true);
+  }
+
+  emitIfChanged(force = false) {
+    const state = this.snapshot();
+    const key = `${state.throttle}|${state.steer}|${state.fire ? 1 : 0}`;
+    if (!force && key === this.previousStateKey) return;
+    this.previousStateKey = key;
     this.sequence += 1;
-    this.lastPacket = this.packet();
-    this.onChange(this.lastPacket);
+    this.onChange(this.packet());
   }
 
   networkPacket() {
-    return { ...this.lastPacket };
+    return this.packet();
   }
 }
 

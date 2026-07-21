@@ -1,8 +1,8 @@
 {
   "name": "ironfront-complete-game",
-  "version": "3.0.0",
+  "version": "4.0.0",
   "private": true,
-  "description": "Complete WebGL single-player and timed faction multiplayer vehicle combat game",
+  "description": "Complete WebGL single-player and low-latency authoritative WebGL vehicle combat game",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
