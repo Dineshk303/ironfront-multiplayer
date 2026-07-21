@@ -10,6 +10,8 @@ const PORT = Number(process.env.PORT || 3000);
 const TICK_RATE = 30;
 const SNAPSHOT_RATE = 15;
 const MAX_PLAYERS = 8;
+const DISCONNECT_GRACE_MS = 30000;
+const INPUT_TIMEOUT_MS = 220;
 
 const app = express();
 const server = http.createServer(app);
@@ -66,6 +68,19 @@ function sanitizeVehicle(value) {
   return VEHICLES[value] ? value : 'vanguard';
 }
 
+function sanitizeClientId(value) {
+  const clean = String(value || '').trim().replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 64);
+  return clean || crypto.randomUUID();
+}
+
+function clearPlayerInput(player) {
+  player.input.forward = false;
+  player.input.backward = false;
+  player.input.left = false;
+  player.input.right = false;
+  player.input.fire = false;
+}
+
 function makeRoomCode() {
   const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
   for (let attempt = 0; attempt < 100; attempt += 1) {
@@ -117,11 +132,15 @@ function emitLobby(room) {
 }
 
 function createPlayer(socket, payload) {
+  const id = sanitizeClientId(payload?.clientId);
   return {
-    id: socket.id,
+    id,
+    socketId: socket.id,
     name: sanitizeName(payload?.name),
     vehicle: sanitizeVehicle(payload?.vehicle),
     connected: true,
+    disconnectedAt: 0,
+    lastInputAt: now(),
     input: { forward: false, backward: false, left: false, right: false, fire: false },
     x: 0,
     z: 0,
@@ -200,12 +219,27 @@ function generateObstacles(room) {
 function spawnPlayers(room) {
   const faction = getFactionStats(room);
   const players = [...room.players.values()];
+  const occupied = [];
+
   players.forEach((player, index) => {
-    const angle = (index / Math.max(1, players.length)) * Math.PI * 2;
-    const distance = Math.min(12, room.radius * 0.35);
-    player.x = Math.cos(angle) * distance;
-    player.z = Math.sin(angle) * distance;
-    player.angle = angle + Math.PI;
+    const preferredAngle = (index / Math.max(1, players.length)) * Math.PI * 2;
+    const preferredDistance = Math.min(12, room.radius * 0.35);
+    const radius = getPlayerStats(room, player).radius;
+    let x = Math.cos(preferredAngle) * preferredDistance;
+    let z = Math.sin(preferredAngle) * preferredDistance;
+    let safe = !collides(room, x, z, radius);
+
+    for (let attempt = 0; attempt < 80 && !safe; attempt += 1) {
+      const angle = preferredAngle + attempt * 0.55;
+      const distance = 5 + (attempt % 6) * Math.max(2.2, (room.radius - 10) / 6);
+      x = Math.cos(angle) * Math.min(distance, room.radius - 5);
+      z = Math.sin(angle) * Math.min(distance, room.radius - 5);
+      safe = !collides(room, x, z, radius) && occupied.every((other) => Math.hypot(x - other.x, z - other.z) > radius + other.radius + 2);
+    }
+
+    player.x = x;
+    player.z = z;
+    player.angle = Math.atan2(-x, z);
     player.score = 0;
     player.kills = 0;
     player.deaths = 0;
@@ -215,9 +249,12 @@ function spawnPlayers(room) {
     player.powerUntil = 0;
     player.abilityUntil = 0;
     player.abilityCooldownUntil = 0;
+    player.lastInputAt = now();
+    clearPlayerInput(player);
     const base = VEHICLES[player.vehicle];
     player.maxHp = Math.round(base.hp * faction.hp);
     player.hp = player.maxHp;
+    occupied.push({ x, z, radius });
   });
 }
 
@@ -347,13 +384,14 @@ function updateRoom(room, dt) {
 
   for (const player of room.players.values()) {
     if (!player.connected) continue;
+    if (time - player.lastInputAt > INPUT_TIMEOUT_MS) clearPlayerInput(player);
     if (player.dead) {
       if (time >= player.respawnAt) respawnPlayer(room, player);
       continue;
     }
 
     const stats = getPlayerStats(room, player);
-    const turn = (player.input.left ? 1 : 0) - (player.input.right ? 1 : 0);
+    const turn = (player.input.right ? 1 : 0) - (player.input.left ? 1 : 0);
     const drive = (player.input.forward ? 1 : 0) - (player.input.backward ? 1 : 0);
     player.angle += turn * dt * 2.45 * world.traction;
 
@@ -433,11 +471,12 @@ function snapshot(room) {
     serverTime: time,
     roomCode: room.code,
     radius: room.radius,
-    settings: room.settings,
+    settings: { ...room.settings },
     players: [...room.players.values()].map((player) => ({
       id: player.id,
       name: player.name,
       vehicle: player.vehicle,
+      connected: player.connected,
       x: player.x,
       z: player.z,
       angle: player.angle,
@@ -458,6 +497,19 @@ function snapshot(room) {
   };
 }
 
+function matchPayload(room) {
+  return {
+    roomCode: room.code,
+    radius: room.radius,
+    settings: { ...room.settings },
+    seed: room.seed,
+    obstacles: room.obstacles,
+    vehicles: VEHICLES,
+    factions: FACTIONS,
+    worlds: WORLDS
+  };
+}
+
 function startMatch(room) {
   room.status = 'playing';
   room.radius = 28 + Math.max(0, room.players.size - 1) * 4.5;
@@ -467,53 +519,104 @@ function startMatch(room) {
   room.nextPowerupAt = now() + 4000;
   room.obstacles = generateObstacles(room);
   spawnPlayers(room);
-  io.to(room.code).emit('matchStarted', {
-    roomCode: room.code,
-    radius: room.radius,
-    settings: room.settings,
-    seed: room.seed,
-    obstacles: room.obstacles,
-    vehicles: VEHICLES,
-    factions: FACTIONS,
-    worlds: WORLDS
-  });
+  io.to(room.code).emit('matchStarted', matchPayload(room));
   emitLobby(room);
 }
 
-function leaveCurrentRoom(socket) {
+function transferLeadership(room) {
+  const next = [...room.players.values()].find((player) => player.connected) || room.players.values().next().value;
+  room.leaderId = next?.id || null;
+}
+
+function removePlayerFromRoom(socket) {
   const code = socket.data.roomCode;
-  if (!code) return;
+  const playerId = socket.data.playerId;
+  if (!code || !playerId) return;
   const room = rooms.get(code);
   socket.leave(code);
   socket.data.roomCode = null;
+  socket.data.playerId = null;
   if (!room) return;
 
-  const player = room.players.get(socket.id);
-  if (player) room.players.delete(socket.id);
-
+  room.players.delete(playerId);
   if (room.players.size === 0) {
     rooms.delete(code);
     return;
   }
-
-  if (room.leaderId === socket.id) {
-    room.leaderId = room.players.keys().next().value;
-  }
+  if (room.leaderId === playerId) transferLeadership(room);
   emitLobby(room);
+}
+
+function detachPlayerSocket(socket) {
+  const code = socket.data.roomCode;
+  const playerId = socket.data.playerId;
+  if (!code || !playerId) return;
+  const room = rooms.get(code);
+  socket.leave(code);
+  socket.data.roomCode = null;
+  socket.data.playerId = null;
+  if (!room) return;
+
+  const player = room.players.get(playerId);
+  if (!player) return;
+  if (player.socketId && player.socketId !== socket.id) return;
+  player.connected = false;
+  player.socketId = null;
+  player.disconnectedAt = now();
+  clearPlayerInput(player);
+  emitLobby(room);
+}
+
+function attachPlayerSocket(room, player, socket) {
+  if (player.socketId && player.socketId !== socket.id) {
+    const previousSocket = io.sockets.sockets.get(player.socketId);
+    previousSocket?.leave(room.code);
+    if (previousSocket) {
+      previousSocket.data.roomCode = null;
+      previousSocket.data.playerId = null;
+      previousSocket.emit('sessionReplaced');
+    }
+  }
+  room.players.set(player.id, player);
+  player.socketId = socket.id;
+  player.connected = true;
+  player.disconnectedAt = 0;
+  player.lastInputAt = now();
+  clearPlayerInput(player);
+  socket.join(room.code);
+  socket.data.roomCode = room.code;
+  socket.data.playerId = player.id;
+}
+
+function cleanupDisconnectedPlayers(room, time) {
+  let changed = false;
+  for (const [playerId, player] of room.players) {
+    if (!player.connected && player.disconnectedAt && time - player.disconnectedAt > DISCONNECT_GRACE_MS) {
+      room.players.delete(playerId);
+      if (room.leaderId === playerId) transferLeadership(room);
+      changed = true;
+    }
+  }
+  if (room.players.size === 0) {
+    rooms.delete(room.code);
+    return false;
+  }
+  if (changed) emitLobby(room);
+  return true;
 }
 
 io.on('connection', (socket) => {
   socket.on('createRoom', (payload, callback) => {
     try {
-      leaveCurrentRoom(socket);
+      removePlayerFromRoom(socket);
       const code = makeRoomCode();
       const player = createPlayer(socket, payload);
       const room = {
         code,
-        leaderId: socket.id,
+        leaderId: player.id,
         status: 'lobby',
         settings: { world: 'jungle', faction: 'iron' },
-        players: new Map([[socket.id, player]]),
+        players: new Map([[player.id, player]]),
         radius: 28,
         seed: hashCode(code),
         obstacles: [],
@@ -522,11 +625,11 @@ io.on('connection', (socket) => {
         nextPowerupAt: now() + 5000
       };
       rooms.set(code, room);
-      socket.join(code);
-      socket.data.roomCode = code;
-      callback?.({ ok: true, room: publicLobby(room), selfId: socket.id });
+      attachPlayerSocket(room, player, socket);
+      callback?.({ ok: true, room: publicLobby(room), selfId: player.id });
       emitLobby(room);
     } catch (error) {
+      console.error('createRoom failed', error);
       callback?.({ ok: false, error: 'Could not create room.' });
     }
   });
@@ -534,22 +637,55 @@ io.on('connection', (socket) => {
   socket.on('joinRoom', (payload, callback) => {
     const code = String(payload?.code || '').trim().toUpperCase();
     const room = rooms.get(code);
+    const clientId = sanitizeClientId(payload?.clientId);
     if (!room) return callback?.({ ok: false, error: 'Room not found.' });
-    if (room.status !== 'lobby') return callback?.({ ok: false, error: 'Match already started.' });
-    if (room.players.size >= MAX_PLAYERS) return callback?.({ ok: false, error: 'Room is full.' });
 
-    leaveCurrentRoom(socket);
-    const player = createPlayer(socket, payload);
-    room.players.set(socket.id, player);
-    socket.join(code);
-    socket.data.roomCode = code;
-    callback?.({ ok: true, room: publicLobby(room), selfId: socket.id });
+    let player = room.players.get(clientId);
+    if (!player) {
+      if (room.status !== 'lobby') return callback?.({ ok: false, error: 'Match already started.' });
+      if (room.players.size >= MAX_PLAYERS) return callback?.({ ok: false, error: 'Room is full.' });
+      removePlayerFromRoom(socket);
+      player = createPlayer(socket, { ...payload, clientId });
+      room.players.set(player.id, player);
+    } else {
+      removePlayerFromRoom(socket);
+      player.name = sanitizeName(payload?.name || player.name);
+      if (room.status === 'lobby') player.vehicle = sanitizeVehicle(payload?.vehicle || player.vehicle);
+    }
+
+    attachPlayerSocket(room, player, socket);
+    callback?.({
+      ok: true,
+      room: publicLobby(room),
+      selfId: player.id,
+      match: room.status === 'playing' ? matchPayload(room) : null,
+      snapshot: room.status === 'playing' ? snapshot(room) : null
+    });
+    emitLobby(room);
+  });
+
+  socket.on('resumeRoom', (payload, callback) => {
+    const code = String(payload?.code || '').trim().toUpperCase();
+    const clientId = sanitizeClientId(payload?.clientId);
+    const room = rooms.get(code);
+    const player = room?.players.get(clientId);
+    if (!room || !player) return callback?.({ ok: false, error: 'Your previous room session is no longer available.' });
+
+    removePlayerFromRoom(socket);
+    attachPlayerSocket(room, player, socket);
+    callback?.({
+      ok: true,
+      room: publicLobby(room),
+      selfId: player.id,
+      match: room.status === 'playing' ? matchPayload(room) : null,
+      snapshot: room.status === 'playing' ? snapshot(room) : null
+    });
     emitLobby(room);
   });
 
   socket.on('setLobbySettings', (payload, callback) => {
     const room = rooms.get(socket.data.roomCode);
-    if (!room || room.leaderId !== socket.id || room.status !== 'lobby') return callback?.({ ok: false });
+    if (!room || room.leaderId !== socket.data.playerId || room.status !== 'lobby') return callback?.({ ok: false });
     if (WORLDS[payload?.world]) room.settings.world = payload.world;
     if (FACTIONS[payload?.faction]) room.settings.faction = payload.faction;
     emitLobby(room);
@@ -558,7 +694,7 @@ io.on('connection', (socket) => {
 
   socket.on('setVehicle', (payload, callback) => {
     const room = rooms.get(socket.data.roomCode);
-    const player = room?.players.get(socket.id);
+    const player = room?.players.get(socket.data.playerId);
     if (!room || !player || room.status !== 'lobby') return callback?.({ ok: false });
     player.vehicle = sanitizeVehicle(payload?.vehicle);
     emitLobby(room);
@@ -567,38 +703,43 @@ io.on('connection', (socket) => {
 
   socket.on('startMatch', (_payload, callback) => {
     const room = rooms.get(socket.data.roomCode);
-    if (!room || room.leaderId !== socket.id || room.status !== 'lobby') return callback?.({ ok: false, error: 'Only the leader can start.' });
-    if (room.players.size < 1) return callback?.({ ok: false, error: 'No players.' });
+    if (!room || room.leaderId !== socket.data.playerId || room.status !== 'lobby') return callback?.({ ok: false, error: 'Only the leader can start.' });
+    const connectedPlayers = [...room.players.values()].filter((player) => player.connected);
+    if (connectedPlayers.length < 1) return callback?.({ ok: false, error: 'No connected players.' });
     startMatch(room);
-    callback?.({ ok: true });
+    callback?.({ ok: true, match: matchPayload(room) });
   });
 
   socket.on('input', (payload) => {
     const room = rooms.get(socket.data.roomCode);
-    const player = room?.players.get(socket.id);
-    if (!room || !player || room.status !== 'playing') return;
+    const player = room?.players.get(socket.data.playerId);
+    if (!room || !player || room.status !== 'playing' || player.socketId !== socket.id) return;
     player.input.forward = Boolean(payload?.forward);
     player.input.backward = Boolean(payload?.backward);
     player.input.left = Boolean(payload?.left);
     player.input.right = Boolean(payload?.right);
     player.input.fire = Boolean(payload?.fire);
+    player.lastInputAt = now();
   });
 
   socket.on('ability', () => {
     const room = rooms.get(socket.data.roomCode);
-    const player = room?.players.get(socket.id);
-    if (room && player && room.status === 'playing') useAbility(room, player);
+    const player = room?.players.get(socket.data.playerId);
+    if (room && player && room.status === 'playing' && player.socketId === socket.id) useAbility(room, player);
   });
 
-  socket.on('leaveRoom', () => leaveCurrentRoom(socket));
-  socket.on('disconnect', () => leaveCurrentRoom(socket));
+  socket.on('leaveRoom', () => removePlayerFromRoom(socket));
+  socket.on('disconnect', () => detachPlayerSocket(socket));
 });
 
 let snapshotAccumulator = 0;
 setInterval(() => {
   const dt = 1 / TICK_RATE;
   snapshotAccumulator += dt;
-  for (const room of rooms.values()) updateRoom(room, dt);
+  const time = now();
+  for (const room of [...rooms.values()]) {
+    if (cleanupDisconnectedPlayers(room, time)) updateRoom(room, dt);
+  }
   if (snapshotAccumulator >= 1 / SNAPSHOT_RATE) {
     snapshotAccumulator = 0;
     for (const room of rooms.values()) {

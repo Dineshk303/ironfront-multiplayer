@@ -67,6 +67,21 @@ let multiplayerSelfId = null;
 let latestSnapshot = null;
 let socket = null;
 let socketConnected = false;
+let resumeInFlight = false;
+let activeMatchKey = null;
+
+const MULTIPLAYER_CLIENT_ID = (() => {
+  const key = 'ironfront-multiplayer-client-v1';
+  try {
+    const existing = localStorage.getItem(key);
+    if (existing) return existing;
+    const created = globalThis.crypto?.randomUUID?.() || `client-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    localStorage.setItem(key, created);
+    return created;
+  } catch {
+    return globalThis.crypto?.randomUUID?.() || `client-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  }
+})();
 
 function loadProfile() {
   try {
@@ -260,7 +275,7 @@ function renderWorldMap() {
 async function loadEngine() {
   if (engine) return engine;
   if (!enginePromise) {
-    enginePromise = import('/engine.js').then((module) => {
+    enginePromise = import('/engine.js?v=2.1.0').then((module) => {
       engine = module;
       return module.initialize({
         canvasHost: document.getElementById('gameCanvas'),
@@ -393,6 +408,7 @@ function showCampaign() {
   gameMode = null;
   pendingLevelResult = null;
   if (engine) engine.stop();
+  activeMatchKey = null;
   renderCampaign();
   showScreen('campaign');
 }
@@ -406,6 +422,58 @@ function resetCampaign() {
   saveProfile();
   renderCampaign();
   showMessage('campaignMessage', 'Campaign restarted at level 1.');
+}
+
+async function enterMultiplayerMatch(match, initialSnapshot = null) {
+  const matchKey = `${match.roomCode}:${match.seed}`;
+  if (activeMatchKey === matchKey && (gameMode === 'multi' || gameMode === 'multi-loading')) {
+    if (initialSnapshot && engine && gameMode === 'multi') engine.applyMultiplayerSnapshot(initialSnapshot);
+    return;
+  }
+
+  activeMatchKey = matchKey;
+  gameMode = 'multi-loading';
+  const gameEngine = await loadEngine();
+  gameMode = 'multi';
+  latestSnapshot = initialSnapshot || latestSnapshot || null;
+  prepareGameHud('multi', WORLD_NAMES[match.settings.world], `${FACTIONS[match.settings.faction]} · Room ${match.roomCode}`);
+  showScreen('game');
+  gameEngine.startMultiplayer({
+    socket,
+    match,
+    selfId: multiplayerSelfId,
+    onHud: updateMultiplayerHud,
+    onEvent: addFeed
+  });
+  if (latestSnapshot) gameEngine.applyMultiplayerSnapshot(latestSnapshot);
+}
+
+async function resumeCurrentRoom() {
+  if (resumeInFlight || !socketConnected || !multiplayerRoom?.code) return;
+  resumeInFlight = true;
+  try {
+    const response = await emitWithAck('resumeRoom', {
+      code: multiplayerRoom.code,
+      clientId: MULTIPLAYER_CLIENT_ID
+    });
+    if (!response?.ok) throw new Error(response?.error || 'Could not restore the room session.');
+    multiplayerSelfId = response.selfId;
+    multiplayerRoom = response.room;
+    if (response.match) {
+      await enterMultiplayerMatch(response.match, response.snapshot || null);
+    } else {
+      activeMatchKey = null;
+      gameMode = null;
+      showScreen('lobby');
+      renderLobby(response.room);
+    }
+  } catch (error) {
+    engine?.releaseAllInputs?.();
+    if (gameMode === 'multi') addFeed(error.message);
+    else showMessage('lobbyMessage', error.message, true);
+  } finally {
+    resumeInFlight = false;
+  }
 }
 
 function setupSocket() {
@@ -426,12 +494,14 @@ function setupSocket() {
   socket.on('connect', () => {
     socketConnected = true;
     setConnectionStatus('online', 'Connected to multiplayer server');
+    if (multiplayerRoom?.code) resumeCurrentRoom();
   });
 
   socket.on('disconnect', (reason) => {
     socketConnected = false;
+    engine?.releaseAllInputs?.();
     setConnectionStatus('offline', `Disconnected: ${reason}`);
-    if (gameMode === 'multi') addFeed('Disconnected from server. Reconnecting…');
+    if (gameMode === 'multi') addFeed('Connection interrupted. Controls stopped while reconnecting…');
   });
 
   socket.on('connect_error', (error) => {
@@ -441,27 +511,30 @@ function setupSocket() {
   });
 
   socket.on('lobbyState', (room) => {
-    if (multiplayerRoom?.code === room.code || !multiplayerRoom) renderLobby(room);
+    if (multiplayerRoom?.code !== room.code && multiplayerRoom) return;
+    multiplayerRoom = room;
+    if (room.status === 'playing') {
+      if (gameMode !== 'multi' && gameMode !== 'multi-loading') resumeCurrentRoom();
+      return;
+    }
+    activeMatchKey = null;
+    renderLobby(room);
   });
 
   socket.on('matchStarted', async (match) => {
     try {
-      const gameEngine = await loadEngine();
-      gameMode = 'multi';
-      latestSnapshot = null;
-      prepareGameHud('multi', WORLD_NAMES[match.settings.world], `${FACTIONS[match.settings.faction]} · Room ${match.roomCode}`);
-      showScreen('game');
-      gameEngine.startMultiplayer({
-        socket,
-        match,
-        selfId: multiplayerSelfId,
-        onHud: updateMultiplayerHud,
-        onEvent: addFeed
-      });
-    } catch {
+      await enterMultiplayerMatch(match);
+    } catch (error) {
+      activeMatchKey = null;
+      gameMode = null;
       showScreen('lobby');
-      showMessage('lobbyMessage', 'The 3D game engine could not load.', true);
+      showMessage('lobbyMessage', `The 3D game engine could not load: ${error.message}`, true);
     }
+  });
+
+  socket.on('sessionReplaced', () => {
+    engine?.releaseAllInputs?.();
+    showMessage('lobbyMessage', 'This player session was opened in another tab or device.', true);
   });
 
   socket.on('snapshot', (snapshot) => {
@@ -566,9 +639,9 @@ async function createRoom() {
   showMessage('homeMessage', 'Connecting and creating a lobby…');
   try {
     await waitForConnection();
-    const response = await emitWithAck('createRoom', { name: playerName(), vehicle: selectedGarageVehicle });
+    const response = await emitWithAck('createRoom', { name: playerName(), vehicle: selectedGarageVehicle, clientId: MULTIPLAYER_CLIENT_ID });
     if (!response?.ok) throw new Error(response?.error || 'Could not create room.');
-    enterLobby(response);
+    await enterLobby(response);
   } catch (error) {
     showMessage('homeMessage', error.message, true);
   } finally {
@@ -586,9 +659,9 @@ async function joinRoom() {
   showMessage('homeMessage', 'Joining multiplayer lobby…');
   try {
     await waitForConnection();
-    const response = await emitWithAck('joinRoom', { code, name: playerName(), vehicle: selectedGarageVehicle });
+    const response = await emitWithAck('joinRoom', { code, name: playerName(), vehicle: selectedGarageVehicle, clientId: MULTIPLAYER_CLIENT_ID });
     if (!response?.ok) throw new Error(response?.error || 'Could not join room.');
-    enterLobby(response);
+    await enterLobby(response);
   } catch (error) {
     showMessage('homeMessage', error.message, true);
   } finally {
@@ -597,10 +670,15 @@ async function joinRoom() {
   }
 }
 
-function enterLobby(response) {
+async function enterLobby(response) {
   multiplayerSelfId = response.selfId;
   multiplayerRoom = response.room;
   history.replaceState(null, '', `?room=${response.room.code}`);
+  if (response.match) {
+    await enterMultiplayerMatch(response.match, response.snapshot || null);
+    return;
+  }
+  activeMatchKey = null;
   showScreen('lobby');
   renderLobby(response.room);
 }
@@ -623,7 +701,9 @@ function renderLobby(room) {
   room.players.forEach((player) => {
     const row = document.createElement('div');
     row.className = 'player-row';
-    row.innerHTML = `<div class="player-avatar">${escapeHtml(player.name.slice(0, 1).toUpperCase())}</div><div><strong>${escapeHtml(player.name)}</strong><br><small>${VEHICLES[player.vehicle]?.name || player.vehicle}</small></div><span>${player.id === room.leaderId ? 'LEADER' : 'READY'}</span>`;
+    const stateLabel = player.connected === false ? 'RECONNECTING' : player.id === room.leaderId ? 'LEADER' : 'READY';
+    row.classList.toggle('disconnected', player.connected === false);
+    row.innerHTML = `<div class="player-avatar">${escapeHtml(player.name.slice(0, 1).toUpperCase())}</div><div><strong>${escapeHtml(player.name)}</strong><br><small>${VEHICLES[player.vehicle]?.name || player.vehicle}</small></div><span>${stateLabel}</span>`;
     list.appendChild(row);
   });
   showMessage('lobbyMessage', isLeader ? 'Choose the world and faction, then start.' : 'Waiting for the lobby leader.');
@@ -658,6 +738,7 @@ function updateMultiplayerHud(hud) {
 
 function leaveCurrentGame() {
   if (engine) engine.stop();
+  activeMatchKey = null;
   document.getElementById('pauseOverlay').classList.add('hidden');
   document.getElementById('levelCompleteOverlay').classList.add('hidden');
   document.getElementById('singleGameOverOverlay').classList.add('hidden');
@@ -742,6 +823,7 @@ document.getElementById('startMatchButton').addEventListener('click', async () =
   try {
     const response = await emitWithAck('startMatch', {});
     if (!response?.ok) showMessage('lobbyMessage', response?.error || 'Could not start match.', true);
+    else if (response.match) await enterMultiplayerMatch(response.match);
   } catch (error) {
     showMessage('lobbyMessage', error.message, true);
   }
@@ -755,6 +837,8 @@ document.getElementById('copyInviteButton').addEventListener('click', async () =
 document.getElementById('leaveLobbyButton').addEventListener('click', () => {
   socket?.emit('leaveRoom');
   multiplayerRoom = null;
+  multiplayerSelfId = null;
+  activeMatchKey = null;
   history.replaceState(null, '', location.pathname);
   showScreen('multiplayer');
 });

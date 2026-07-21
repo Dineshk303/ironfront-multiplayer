@@ -667,7 +667,7 @@ function updateSinglePlayer(deltaTime) {
   const now = performance.now();
   const vehicle = VEHICLES[single.currentVehicle];
   const stats = playerStats(single);
-  const turn = (engineState.input.left ? 1 : 0) - (engineState.input.right ? 1 : 0);
+  const turn = (engineState.input.right ? 1 : 0) - (engineState.input.left ? 1 : 0);
   const drive = (engineState.input.forward ? 1 : 0) - (engineState.input.backward ? 1 : 0);
   single.player.mesh.rotation.y += turn * deltaTime * 2.45 * world.traction;
   if (drive !== 0) {
@@ -976,6 +976,12 @@ function syncMultiplayer(snapshot, deltaTime) {
     const entry = ensureMultiplayerPlayerMesh(player);
     entry.group.visible = !player.dead;
     entry.label.visible = !player.dead;
+    entry.group.traverse((child) => {
+      if (child.material) {
+        child.material.transparent = player.connected === false;
+        child.material.opacity = player.connected === false ? 0.45 : 1;
+      }
+    });
     entry.group.position.x = THREE.MathUtils.lerp(entry.group.position.x, player.x, 1 - Math.pow(0.0001, deltaTime));
     entry.group.position.z = THREE.MathUtils.lerp(entry.group.position.z, player.z, 1 - Math.pow(0.0001, deltaTime));
     const difference = Math.atan2(Math.sin(player.angle - entry.group.rotation.y), Math.cos(player.angle - entry.group.rotation.y));
@@ -1086,6 +1092,8 @@ function resize() {
 
 function handleKey(event, active) {
   if (engineState.mode === 'idle') return;
+  const target = event.target;
+  if (target instanceof HTMLElement && (target.matches('input, textarea, select, button') || target.isContentEditable)) return;
   const controlCodes = ['KeyW', 'KeyS', 'KeyA', 'KeyD', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Space'];
   if (controlCodes.includes(event.code)) event.preventDefault();
   if (event.code === 'KeyW' || event.code === 'ArrowUp') setInput('forward', active);
@@ -1148,6 +1156,10 @@ export async function initialize({ canvasHost: host, onFatalError }) {
   window.addEventListener('keydown', (event) => handleKey(event, true));
   window.addEventListener('keyup', (event) => handleKey(event, false));
   window.addEventListener('blur', resetInput);
+  window.addEventListener('pagehide', resetInput);
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) resetInput();
+  });
   resize();
   initialized = true;
   engineState.previousTime = performance.now();
@@ -1171,8 +1183,14 @@ export function applyMultiplayerSnapshot(snapshot) {
 
 export function setInput(control, active) {
   if (!(control in engineState.input)) return;
-  engineState.input[control] = Boolean(active);
+  const next = Boolean(active);
+  if (engineState.input[control] === next) return;
+  engineState.input[control] = next;
   if (engineState.mode === 'multi') sendMultiplayerInput(true);
+}
+
+export function releaseAllInputs() {
+  resetInput();
 }
 
 export function activateAbility() {

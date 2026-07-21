@@ -28,3 +28,17 @@ The repository includes `render.yaml`. Connect the repository as a Render Bluepr
 ## Important deployment fix
 
 The server exposes the entire Three.js build directory at `/vendor`. `three.module.js` imports `three.core.js`, so both files must be served. This fixes the previous blank vehicle selector and non-working Create Game button.
+
+
+## Multiplayer reliability update 2.1
+
+- Stable browser player IDs instead of temporary Socket.IO connection IDs
+- Automatic lobby and active-match rejoin after a connection interruption
+- A 30-second disconnect grace period before a player is removed
+- Missed match-start recovery for clients that reconnect while a match is running
+- Server-side stale-input timeout to prevent vehicles driving after a lost key-up event
+- Left/right steering correction
+- Safe spawn placement away from world obstacles
+- Input reset on blur, hidden tab and page exit
+
+After uploading this version, deploy the latest commit and use a hard refresh (`Ctrl + Shift + R`).
