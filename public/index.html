@@ -4,16 +4,141 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#07101d">
-  <title>Ironfront Multiplayer</title>
+  <title>Ironfront: World War</title>
   <link rel="stylesheet" href="/styles.css">
 </head>
 <body>
   <main id="app">
-    <section id="homeScreen" class="screen active menu-screen">
-      <div class="menu-card">
-        <div class="eyebrow">REAL-TIME WEBGL MULTIPLAYER</div>
-        <h1>IRONFRONT ONLINE</h1>
-        <p class="lead">Create a private lobby, share its URL, and battle with up to eight players.</p>
+    <section id="modeScreen" class="screen active menu-screen">
+      <div class="hero-card wide-card">
+        <div class="eyebrow">WEBGL VEHICLE COMBAT</div>
+        <h1>IRONFRONT: WORLD WAR</h1>
+        <p class="lead">Play the complete five-world campaign alone, or create an online lobby for up to eight players.</p>
+
+        <div class="mode-grid">
+          <button id="singlePlayerButton" class="mode-card primary-mode" type="button">
+            <span class="mode-kicker">FULL CAMPAIGN</span>
+            <strong>Single Player</strong>
+            <small>Levels, bosses, coins, garage, upgrades and five 3D worlds.</small>
+          </button>
+          <button id="multiplayerButton" class="mode-card" type="button">
+            <span class="mode-kicker">ONLINE BATTLE</span>
+            <strong>Multiplayer</strong>
+            <small>Create or join a private room and fight with up to eight players.</small>
+          </button>
+        </div>
+
+        <div class="feature-strip">
+          <span>2D / 3D camera</span>
+          <span>Vehicle morph pickups</span>
+          <span>Boss every 5 levels</span>
+          <span>Jungle to Space</span>
+        </div>
+      </div>
+    </section>
+
+    <section id="campaignScreen" class="screen menu-screen">
+      <div class="dashboard-shell">
+        <header class="dashboard-header">
+          <div>
+            <div class="eyebrow">SINGLE-PLAYER CAMPAIGN</div>
+            <h2>COMMAND CENTER</h2>
+          </div>
+          <button class="backToModes" type="button">Back</button>
+        </header>
+
+        <div class="stat-grid">
+          <div class="stat-card"><span>Coins</span><strong id="campaignCoins">150</strong></div>
+          <div class="stat-card"><span>Current level</span><strong id="campaignLevel">1</strong></div>
+          <div class="stat-card"><span>World</span><strong id="campaignWorld">Emerald Jungle</strong></div>
+          <div class="stat-card"><span>Vehicle</span><strong id="campaignVehicle">Vanguard</strong></div>
+        </div>
+
+        <div class="campaign-layout">
+          <div class="menu-card campaign-main-card">
+            <div id="campaignWorldBadge" class="world-hero world-jungle">
+              <div>
+                <span id="campaignWorldStage">WORLD 1 · LEVEL 1</span>
+                <strong id="campaignWorldTitle">EMERALD JUNGLE</strong>
+                <small id="campaignWorldEffect">Mud zones reduce traction.</small>
+              </div>
+            </div>
+
+            <div class="campaign-actions">
+              <button id="continueCampaignButton" class="primary large" type="button">Play level 1</button>
+              <button id="newCampaignButton" type="button">Restart campaign</button>
+              <button id="campaignGarageButton" type="button">Vehicle garage</button>
+              <button id="campaignArmoryButton" type="button">Armory upgrades</button>
+              <button id="campaignWorldMapButton" type="button">World map</button>
+            </div>
+            <p id="campaignMessage" class="message" aria-live="polite"></p>
+          </div>
+
+          <aside class="menu-card vehicle-summary-card">
+            <div class="section-title">Equipped vehicle</div>
+            <div id="equippedVehiclePreview" class="vehicle-preview-icon">V</div>
+            <h3 id="equippedVehicleName">Vanguard Tank</h3>
+            <p id="equippedVehicleAbility" class="muted">Fortress Shield</p>
+            <div id="equippedVehicleStats" class="mini-stat-list"></div>
+          </aside>
+        </div>
+      </div>
+    </section>
+
+    <section id="garageScreen" class="screen menu-screen">
+      <div class="dashboard-shell">
+        <header class="dashboard-header">
+          <div><div class="eyebrow">3D VEHICLE COLLECTION</div><h2>GARAGE</h2></div>
+          <button id="closeGarageButton" type="button">Close</button>
+        </header>
+        <div class="garage-layout">
+          <div id="garageVehicleGrid" class="garage-grid"></div>
+          <aside class="menu-card vehicle-detail-card">
+            <div id="garageVehicleIcon" class="vehicle-preview-icon">V</div>
+            <div class="detail-heading"><div><h3 id="garageVehicleName">Vanguard Tank</h3><p id="garageVehicleAbility" class="muted">Fortress Shield</p></div><span id="garageVehiclePrice" class="pill">Owned</span></div>
+            <p id="garageVehicleDescription" class="muted"></p>
+            <div id="garageVehicleStats" class="mini-stat-list"></div>
+            <button id="garageVehicleAction" class="primary large" type="button">Equipped</button>
+            <p id="garageMessage" class="message" aria-live="polite"></p>
+          </aside>
+        </div>
+      </div>
+    </section>
+
+    <section id="armoryScreen" class="screen menu-screen">
+      <div class="dashboard-shell">
+        <header class="dashboard-header">
+          <div><div class="eyebrow">PERMANENT CAMPAIGN UPGRADES</div><h2>ARMORY</h2></div>
+          <button id="closeArmoryButton" type="button">Close</button>
+        </header>
+        <div class="stat-grid compact-stats">
+          <div class="stat-card"><span>Available coins</span><strong id="armoryCoins">150</strong></div>
+          <div class="stat-card"><span>Return to</span><strong id="armoryReturnLabel">Campaign</strong></div>
+        </div>
+        <div id="upgradeGrid" class="upgrade-grid"></div>
+        <p id="armoryMessage" class="message" aria-live="polite"></p>
+      </div>
+    </section>
+
+    <section id="worldMapScreen" class="screen menu-screen">
+      <div class="dashboard-shell">
+        <header class="dashboard-header">
+          <div><div class="eyebrow">CAMPAIGN ROUTE</div><h2>WORLD MAP</h2></div>
+          <button id="closeWorldMapButton" type="button">Close</button>
+        </header>
+        <div id="worldMapGrid" class="world-map-grid"></div>
+      </div>
+    </section>
+
+    <section id="multiplayerHomeScreen" class="screen menu-screen">
+      <div class="menu-card multiplayer-card">
+        <div class="top-row">
+          <div><div class="eyebrow">REAL-TIME ONLINE BATTLE</div><h2>IRONFRONT ONLINE</h2></div>
+          <button class="backToModes" type="button">Back</button>
+        </div>
+        <p class="lead small-lead">Create a private lobby, share the invite URL, and battle with up to eight players.</p>
+
+        <div id="connectionStatus" class="connection-status offline"><span></span><strong>Connecting to server…</strong></div>
 
         <label class="field">
           <span>Player name</span>
@@ -24,10 +149,10 @@
         <div id="homeVehicleGrid" class="vehicle-grid"></div>
 
         <div class="home-actions">
-          <button id="createRoomButton" class="primary large">Create game</button>
+          <button id="createRoomButton" class="primary large" type="button">Create online game</button>
           <div class="join-row">
             <input id="roomCodeInput" maxlength="5" placeholder="ROOM CODE" autocomplete="off">
-            <button id="joinRoomButton">Join game</button>
+            <button id="joinRoomButton" type="button">Join game</button>
           </div>
         </div>
         <p id="homeMessage" class="message" aria-live="polite"></p>
@@ -38,35 +163,15 @@
       <div class="lobby-layout">
         <div class="menu-card lobby-main">
           <div class="lobby-header">
-            <div>
-              <div class="eyebrow">PRIVATE LOBBY</div>
-              <h2>ROOM <span id="roomCodeLabel">-----</span></h2>
-            </div>
-            <button id="copyInviteButton">Copy invite URL</button>
+            <div><div class="eyebrow">PRIVATE MULTIPLAYER LOBBY</div><h2>ROOM <span id="roomCodeLabel">-----</span></h2></div>
+            <button id="copyInviteButton" type="button">Copy invite URL</button>
           </div>
 
           <div id="leaderSettings" class="leader-settings hidden">
-            <div class="section-title">Leader match settings</div>
+            <div class="section-title">Lobby leader settings</div>
             <div class="settings-grid">
-              <label class="field">
-                <span>World</span>
-                <select id="worldSelect">
-                  <option value="jungle">Emerald Jungle</option>
-                  <option value="mountain">Frozen Mountain</option>
-                  <option value="arena">Grand Combat Arena</option>
-                  <option value="battlefield">Ruined Battleground</option>
-                  <option value="space">Zero-G Space Station</option>
-                </select>
-              </label>
-              <label class="field">
-                <span>Faction</span>
-                <select id="factionSelect">
-                  <option value="iron">Iron Legion — extra hull</option>
-                  <option value="neon">Neon Wolves — extra speed</option>
-                  <option value="solar">Solar Dominion — extra damage</option>
-                  <option value="void">Void Syndicate — faster abilities</option>
-                </select>
-              </label>
+              <label class="field"><span>World</span><select id="worldSelect"><option value="jungle">Emerald Jungle</option><option value="mountain">Frozen Mountain</option><option value="arena">Grand Combat Arena</option><option value="battlefield">Ruined Battleground</option><option value="space">Zero-G Space Station</option></select></label>
+              <label class="field"><span>Faction</span><select id="factionSelect"><option value="iron">Iron Legion — extra hull</option><option value="neon">Neon Wolves — extra speed</option><option value="solar">Solar Dominion — extra damage</option><option value="void">Void Syndicate — faster abilities</option></select></label>
             </div>
           </div>
 
@@ -74,19 +179,16 @@
           <div id="lobbyVehicleGrid" class="vehicle-grid"></div>
 
           <div class="lobby-actions">
-            <button id="startMatchButton" class="primary hidden">Start match</button>
-            <button id="leaveLobbyButton">Leave lobby</button>
+            <button id="startMatchButton" class="primary hidden" type="button">Start match</button>
+            <button id="leaveLobbyButton" type="button">Leave lobby</button>
           </div>
           <p id="lobbyMessage" class="message" aria-live="polite"></p>
         </div>
 
         <aside class="menu-card player-panel">
-          <div class="player-panel-title">
-            <h3>Players</h3>
-            <span id="playerCountLabel">0 / 8</span>
-          </div>
+          <div class="player-panel-title"><h3>Players</h3><span id="playerCountLabel">0 / 8</span></div>
           <div id="lobbyPlayerList" class="player-list"></div>
-          <div class="lobby-tip">The arena grows as more players join. The leader chooses the world and faction.</div>
+          <div class="lobby-tip">The arena expands with player count. The lobby leader chooses the faction and world.</div>
         </aside>
       </div>
     </section>
@@ -95,46 +197,47 @@
       <div id="gameCanvas"></div>
 
       <header class="hud top-hud">
-        <div class="hud-card health-card">
-          <span class="hud-label">HULL</span>
-          <div class="health-track"><div id="healthBar" class="health-fill"></div></div>
-          <strong id="healthText">0 / 0</strong>
-        </div>
-        <div class="hud-card world-card">
-          <strong id="worldLabel">Emerald Jungle</strong>
-          <span id="factionLabel">Iron Legion</span>
-        </div>
-        <div class="hud-card score-card">
-          <span>K <strong id="killsLabel">0</strong></span>
-          <span>D <strong id="deathsLabel">0</strong></span>
-          <span>S <strong id="scoreLabel">0</strong></span>
-        </div>
+        <div class="hud-card health-card"><span class="hud-label">HULL</span><div class="health-track"><div id="healthBar" class="health-fill"></div></div><strong id="healthText">0 / 0</strong></div>
+        <div class="hud-card world-card"><span id="gameModeLabel" class="hud-label">CAMPAIGN</span><strong id="worldLabel">Emerald Jungle</strong><span id="subWorldLabel">Level 1</span></div>
+        <div class="hud-card score-card"><span>K <strong id="killsLabel">0</strong></span><span id="deathHud">D <strong id="deathsLabel">0</strong></span><span>S <strong id="scoreLabel">0</strong></span><span id="coinHud">C <strong id="gameCoinsLabel">0</strong></span></div>
       </header>
 
-      <aside class="hud player-roster" id="gamePlayerList"></aside>
-
+      <aside class="hud player-roster hidden" id="gamePlayerList"></aside>
+      <div id="bossPanel" class="hud boss-panel hidden"><div class="boss-heading"><span id="bossLabel">World Boss</span><strong id="bossHealthText">0 / 0</strong></div><div class="boss-track"><div id="bossHealthBar"></div></div></div>
       <div id="powerupBanner" class="powerup-banner hidden"></div>
       <div id="respawnOverlay" class="respawn-overlay hidden">Respawning…</div>
       <div id="eventFeed" class="event-feed"></div>
 
       <div class="hud bottom-controls">
-        <button id="cameraToggleButton">2D camera</button>
-        <button id="abilityButton" class="primary">Ability [Q]</button>
-        <button id="leaveMatchButton">Leave match</button>
+        <button id="cameraToggleButton" type="button">2D camera</button>
+        <button id="abilityButton" class="primary" type="button">Ability [Q]</button>
+        <button id="pauseGameButton" type="button">Pause</button>
+        <button id="leaveMatchButton" type="button">Leave match</button>
       </div>
 
       <div class="mobile-controls">
-        <div class="dpad">
-          <span></span><button data-touch="forward">▲</button><span></span>
-          <button data-touch="left">◀</button><button data-touch="backward">▼</button><button data-touch="right">▶</button>
-        </div>
-        <button id="mobileFireButton" class="fire-button">FIRE</button>
-        <button id="mobileAbilityButton" class="ability-mobile">ABILITY</button>
+        <div class="dpad"><span></span><button data-touch="forward" type="button">▲</button><span></span><button data-touch="left" type="button">◀</button><button data-touch="backward" type="button">▼</button><button data-touch="right" type="button">▶</button></div>
+        <button id="mobileFireButton" class="fire-button" type="button">FIRE</button>
+        <button id="mobileAbilityButton" class="ability-mobile" type="button">ABILITY</button>
+      </div>
+
+      <div id="pauseOverlay" class="game-modal hidden">
+        <div class="modal-card"><div class="eyebrow">BATTLE PAUSED</div><h2>PAUSED</h2><button id="resumeGameButton" class="primary large" type="button">Resume</button><button id="pauseExitButton" type="button">Exit to menu</button></div>
+      </div>
+
+      <div id="levelCompleteOverlay" class="game-modal hidden">
+        <div class="modal-card"><div class="eyebrow">SECTOR SECURED</div><h2 id="levelCompleteTitle">Level complete</h2><p id="levelCompleteText" class="muted"></p><div class="modal-actions"><button id="nextLevelButton" class="primary large" type="button">Next level</button><button id="betweenLevelArmoryButton" type="button">Open armory</button><button id="completeExitButton" type="button">Campaign menu</button></div></div>
+      </div>
+
+      <div id="singleGameOverOverlay" class="game-modal hidden">
+        <div class="modal-card"><div class="eyebrow">VEHICLE DESTROYED</div><h2>MISSION FAILED</h2><p id="singleGameOverText" class="muted"></p><div class="modal-actions"><button id="retryLevelButton" class="primary large" type="button">Retry level</button><button id="gameOverExitButton" type="button">Campaign menu</button></div></div>
       </div>
     </section>
   </main>
 
+  <div id="fatalError" class="fatal-error hidden"><strong>Game engine error</strong><span id="fatalErrorText"></span><button id="reloadButton" type="button">Reload</button></div>
+
   <script src="/socket.io/socket.io.js"></script>
-  <script type="module" src="/game.js"></script>
+  <script src="/app.js"></script>
 </body>
 </html>

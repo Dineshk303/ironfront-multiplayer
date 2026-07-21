@@ -1,13 +1,13 @@
 {
-  "name": "ironfront-multiplayer",
-  "version": "1.0.0",
+  "name": "ironfront-complete-game",
+  "version": "2.0.0",
   "private": true,
-  "description": "WebGL multiplayer vehicle arena for up to 8 players",
+  "description": "Complete WebGL single-player and multiplayer vehicle combat game",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
     "dev": "node --watch server.js",
-    "check": "node --check server.js && node --check public/game.js"
+    "check": "node --check server.js && node --check public/app.js && node --check public/engine.js"
   },
   "engines": {
     "node": ">=20"

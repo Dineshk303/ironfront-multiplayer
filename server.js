@@ -18,10 +18,9 @@ const io = new Server(server, {
 });
 
 app.use(express.static(path.join(__dirname, 'public')));
-app.get('/vendor/three.module.js', (_req, res) => {
-  res.sendFile(path.join(__dirname, 'node_modules', 'three', 'build', 'three.module.js'));
-});
-app.get('/health', (_req, res) => res.json({ ok: true, rooms: rooms.size }));
+app.use('/vendor', express.static(path.join(__dirname, 'node_modules', 'three', 'build'), { maxAge: '1d', immutable: true }));
+app.get('/health', (_req, res) => res.json({ ok: true, rooms: rooms.size, players: [...rooms.values()].reduce((sum, room) => sum + room.players.size, 0) }));
+app.get('/api/status', (_req, res) => res.json({ ok: true, maxPlayers: MAX_PLAYERS, worlds: Object.keys(WORLDS), vehicles: Object.keys(VEHICLES) }));
 
 const rooms = new Map();
 
@@ -609,5 +608,5 @@ setInterval(() => {
 }, 1000 / TICK_RATE);
 
 server.listen(PORT, () => {
-  console.log(`Ironfront Multiplayer running on http://localhost:${PORT}`);
+  console.log(`Ironfront Complete Game running on http://localhost:${PORT}`);
 });
